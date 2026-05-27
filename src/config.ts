@@ -37,6 +37,9 @@ export const cfg = {
   clobApiKey: process.env.CLOB_API_KEY,
   clobSecret: process.env.CLOB_SECRET,
   clobPassphrase: process.env.CLOB_PASS_PHRASE,
-  liveTradingEnabled: Boolean(process.env.PRIVATE_KEY?.trim()),
+  paperMode: envBool(process.env.PAPER_MODE, false),
+  webhookUrl: (process.env.WEBHOOK_URL ?? "").trim(),
+  liveTradingEnabled:
+    Boolean(process.env.PRIVATE_KEY?.trim()) && !envBool(process.env.PAPER_MODE, false),
   closeAfterSeconds: Number(process.env.CLOSE_AFTER_SECONDS ?? 0)
 };

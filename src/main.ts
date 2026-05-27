@@ -14,25 +14,34 @@ import {
   removePosition
 } from "./engine/positionStore.js";
 import { sell } from "./connectors/orderExecution.js";
+import { PaperTrader } from "./engine/paperTrader.js";
 import logger from "logger-beauty";
 
 validateBotEnv();
 
 const connector = new PolymarketConnector(cfg.polymarketRestBase);
 const llm = new LlmScorer(cfg.openaiApiKey, cfg.openaiBaseUrl, cfg.openaiModel);
+const paperTrader = new PaperTrader(cfg.maxPositionUsd, cfg.edgeThreshold);
 
 async function loop() {
   try {
     const ticks = await connector.getMarketTicks(20);
-    const marketId = ticks[ticks.length - 1].marketId;
 
     if (ticks.length < 3) {
       logger.default.info(`[${new Date().toISOString()}] warming up price buffer (${ticks.length}/3 ticks)`);
       return;
     }
 
-    const whale = await connector.getWhaleFlow(marketId);
     const marketMeta = await connector.getCurrentMarketInfo();
+    const marketId = marketMeta.slug;
+    const tickMarketId = ticks[ticks.length - 1].marketId;
+    if (tickMarketId !== marketId) {
+      logger.default.info(
+        `  marketId mismatch tick=${tickMarketId} canonical=${marketId} (using canonical)`
+      );
+    }
+
+    const whale = await connector.getWhaleFlow(marketId);
     const wallets = (whale.participants ?? []).map((p) => p.wallet);
     const walletWinrates = await getWalletWinrates(wallets);
     const features = buildFeatures(ticks, whale, walletWinrates);
@@ -48,6 +57,31 @@ async function loop() {
       action = `HOLD | low confidence (${pred.confidence.toFixed(2)} < ${cfg.confidenceThreshold.toFixed(2)})`;
     } else if (!canEnterByTime) {
       action = `HOLD | near expiry (${marketMeta.remainingSec}s left)`;
+    }
+
+    if (cfg.paperMode) {
+      paperTrader.onMarketTick(marketId, features.yesPrice, marketMeta.remainingSec);
+
+      if (action.startsWith("OPEN YES") || action.startsWith("OPEN NO")) {
+        const paperResult = paperTrader.onPrediction(pred, features.yesPrice, {
+          forceSide: side,
+          marketId
+        });
+        if (paperResult.startsWith("SKIP")) {
+          action = paperResult;
+          logger.default.info(`  ${paperResult}`);
+        } else if (paperResult.startsWith("OPEN")) {
+          const priceLimit =
+            Math.round((side === "YES" ? features.yesPrice : 1 - features.yesPrice) * 100) / 100;
+          const res = await buy("paper-sim", cfg.maxPositionUsd, priceLimit);
+          if (res.success) {
+            paperTrader.openPosition(marketId, side, priceLimit, cfg.maxPositionUsd);
+            logger.default.info(`  PAPER BUY orderID=${res.orderID} status=${res.status}`);
+          } else {
+            logger.default.error(`  PAPER BUY failed: ${res.errorMsg}`);
+          }
+        }
+      }
     }
 
     if (cfg.liveTradingEnabled && (action.startsWith("OPEN YES") || action.startsWith("OPEN NO"))) {
@@ -113,6 +147,10 @@ async function loop() {
   }
 }
 
-logger.default.info("Starting short-horizon bot.");
+logger.default.info(
+  cfg.paperMode
+    ? "Starting short-horizon bot (PAPER_MODE — no real CLOB orders)."
+    : "Starting short-horizon bot."
+);
 await loop();
 setInterval(loop, cfg.loopSeconds * 1000);

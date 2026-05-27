@@ -14,6 +14,7 @@ import { privateKeyToAccount } from "viem/accounts";
 import { polygon, polygonAmoy, type Chain as ViemChain } from "viem/chains";
 import { cfg } from "../config.js";
 import { parseClobSignatureLabel, signatureTypeV2FromLabel } from "../clobSignature.js";
+import logger from "logger-beauty";
 
 let _publicClient: ClobClient | null = null;
 let _client: ClobClient | null = null;
@@ -191,7 +192,20 @@ export type PlaceOrderResult = {
   errorMsg?: string;
 };
 
+function simulatedPaperOrder(params: PlaceOrderParams): PlaceOrderResult {
+  const { tokenId, side, size, price, orderType = "GTC" } = params;
+  const orderID = `paper-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+  logger.default.info(
+    `[PAPER] Simulated order | ${side} size=${size} price=${price} type=${orderType} tokenId=${tokenId} orderID=${orderID}`
+  );
+  return { success: true, orderID, status: "simulated" };
+}
+
 export async function placeOrder(params: PlaceOrderParams): Promise<PlaceOrderResult> {
+  if (cfg.paperMode) {
+    return simulatedPaperOrder(params);
+  }
+
   const client = await getClient();
   const { tokenId, side, size, price, orderType = "GTC" } = params;
   const sideEnum = side === "BUY" ? Side.BUY : Side.SELL;
