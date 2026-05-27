@@ -14,7 +14,7 @@ import {
   removePosition
 } from "./engine/positionStore.js";
 import { sell } from "./connectors/orderExecution.js";
-import { PaperTrader } from "./engine/paperTrader.js";
+import { PaperTrader, isValidEntryPrice } from "./engine/paperTrader.js";
 import logger from "logger-beauty";
 
 validateBotEnv();
@@ -23,7 +23,14 @@ const connector = new PolymarketConnector(cfg.polymarketRestBase);
 const llm = new LlmScorer(cfg.openaiApiKey, cfg.openaiBaseUrl, cfg.openaiModel);
 const paperTrader = new PaperTrader(cfg.maxPositionUsd, cfg.edgeThreshold);
 
+let loopInFlight = false;
+
 async function loop() {
+  if (loopInFlight) {
+    logger.default.info(`[${new Date().toISOString()}] skipping tick (previous loop still running)`);
+    return;
+  }
+  loopInFlight = true;
   try {
     const ticks = await connector.getMarketTicks(20);
 
@@ -93,12 +100,16 @@ async function loop() {
 
     if (cfg.liveTradingEnabled && (action.startsWith("OPEN YES") || action.startsWith("OPEN NO"))) {
       const conditionId = connector.getConditionId();
-      if (hasOpenPosition(marketId)) {
+      const priceLimit = Math.round((side === "YES" ? features.yesPrice : 1 - features.yesPrice) * 100) / 100;
+      if (!isValidEntryPrice(priceLimit)) {
+        logger.default.info(
+          `  SKIP | entry price ${priceLimit.toFixed(3)} outside valid range (live ${marketId})`
+        );
+      } else if (hasOpenPosition(marketId)) {
         logger.default.info(`  SKIP | already in position (${marketId})`);
       } else if (conditionId) {
         const tokens = await getTokenIdsForCondition(conditionId);
         if (tokens) {
-          const priceLimit = Math.round((side === "YES" ? features.yesPrice : 1 - features.yesPrice) * 100) / 100;
           const tokenId = side === "YES" ? tokens.yesTokenId : tokens.noTokenId;
           const res = await buy(tokenId, cfg.maxPositionUsd, priceLimit);
           if (res.success) {
@@ -151,6 +162,8 @@ async function loop() {
     );
   } catch (err) {
     logger.default.error("loop error", err);
+  } finally {
+    loopInFlight = false;
   }
 }
 

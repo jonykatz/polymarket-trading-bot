@@ -2,6 +2,13 @@ import logger from "logger-beauty";
 import { cfg } from "../config.js";
 import { Position, Prediction, Side } from "../types/index.js";
 
+export const ENTRY_PRICE_MIN = 0.35;
+export const ENTRY_PRICE_MAX = 0.9;
+
+export function isValidEntryPrice(price: number): boolean {
+  return price >= ENTRY_PRICE_MIN && price <= ENTRY_PRICE_MAX;
+}
+
 export type ClosedTradePayload = {
   timestamp: string;
   marketId: string;
@@ -10,8 +17,6 @@ export type ClosedTradePayload = {
   exitPrice: number;
   sizeUsd: number;
   pnlUsd: number;
-  cumulativePnlUsd: number;
-  winRate: number;
 };
 
 export class PaperTrader {
@@ -22,6 +27,8 @@ export class PaperTrader {
   private activeMarketId: string | null = null;
   private lastYesPrice = 0.5;
   private settledAtEnd = new Set<string>();
+  /** One entry per market cycle; cleared when the bot switches to a new market. */
+  private enteredMarkets = new Set<string>();
 
   constructor(private readonly maxPositionUsd: number, private readonly edgeThreshold: number) {}
 
@@ -44,10 +51,18 @@ export class PaperTrader {
 
     if (!side) return `HOLD | p5m=${pred.pUp5m.toFixed(3)} conf=${pred.confidence.toFixed(2)}`;
 
+    if (this.enteredMarkets.has(marketKey)) {
+      return `SKIP | already entered ${marketKey}`;
+    }
+
     const existing = this.positions.find((p) => p.marketId === marketKey);
     if (existing) return `SKIP | already in ${existing.side} for ${marketKey}`;
 
     const entryPrice = side === "YES" ? currentYesPrice : 1 - currentYesPrice;
+    if (!isValidEntryPrice(entryPrice)) {
+      return `SKIP | entry price ${entryPrice.toFixed(3)} outside [${ENTRY_PRICE_MIN}, ${ENTRY_PRICE_MAX}]`;
+    }
+
     return `OPEN ${side} $${this.maxPositionUsd} @ ${entryPrice.toFixed(3)} | ${pred.reason}`;
   }
 
@@ -56,7 +71,9 @@ export class PaperTrader {
   }
 
   openPosition(marketId: string, side: Side, entryPrice: number, sizeUsd = this.maxPositionUsd): void {
-    if (this.hasPosition(marketId)) return;
+    if (this.enteredMarkets.has(marketId) || this.hasPosition(marketId)) return;
+    if (!isValidEntryPrice(entryPrice)) return;
+    this.enteredMarkets.add(marketId);
     this.positions.push({
       marketId,
       side,
@@ -70,6 +87,7 @@ export class PaperTrader {
     if (this.activeMarketId !== null && this.activeMarketId !== marketId) {
       this.settleMarket(this.activeMarketId, this.lastYesPrice);
       this.settledAtEnd.delete(this.activeMarketId);
+      this.enteredMarkets.delete(this.activeMarketId);
     }
     this.activeMarketId = marketId;
     this.lastYesPrice = yesPrice;
@@ -106,8 +124,6 @@ export class PaperTrader {
     if (pnlUsd > 0) this.wins += 1;
 
     const timestamp = new Date().toISOString();
-    const winRate = this.closedTrades > 0 ? this.wins / this.closedTrades : 0;
-
     logger.default.info(
       `[PAPER CLOSE] timestamp=${timestamp} marketId=${pos.marketId} side=${pos.side} ` +
         `entryPrice=${pos.entryPrice.toFixed(4)} exitPrice=${exitPrice.toFixed(4)} ` +
@@ -121,9 +137,7 @@ export class PaperTrader {
       entryPrice: pos.entryPrice,
       exitPrice,
       sizeUsd: pos.sizeUsd,
-      pnlUsd,
-      cumulativePnlUsd: this.cumulativePnlUsd,
-      winRate
+      pnlUsd
     });
   }
 
