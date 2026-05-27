@@ -21,6 +21,7 @@ export class PaperTrader {
   private closedTrades = 0;
   private activeMarketId: string | null = null;
   private lastYesPrice = 0.5;
+  private settledAtEnd = new Set<string>();
 
   constructor(private readonly maxPositionUsd: number, private readonly edgeThreshold: number) {}
 
@@ -68,12 +69,18 @@ export class PaperTrader {
   onMarketTick(marketId: string, yesPrice: number, remainingSec: number): void {
     if (this.activeMarketId !== null && this.activeMarketId !== marketId) {
       this.settleMarket(this.activeMarketId, this.lastYesPrice);
+      this.settledAtEnd.delete(this.activeMarketId);
     }
     this.activeMarketId = marketId;
     this.lastYesPrice = yesPrice;
 
-    if (remainingSec === 0 && this.positions.some((p) => p.marketId === marketId)) {
+    const hasOpen = this.positions.some((p) => p.marketId === marketId);
+    const inFinalWindow =
+      remainingSec >= 0 && remainingSec < cfg.loopSeconds && !this.settledAtEnd.has(marketId);
+
+    if (hasOpen && (remainingSec === 0 || inFinalWindow)) {
       this.settleMarket(marketId, yesPrice);
+      this.settledAtEnd.add(marketId);
     }
   }
 

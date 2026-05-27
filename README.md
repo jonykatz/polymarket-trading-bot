@@ -121,6 +121,8 @@ Copy `.env.example` to `.env` and adjust as needed.
 | `CLOB_BUILDER_CODE` | Optional `bytes32` builder attribution | (empty) |
 | `CLOB_USE_SERVER_TIME` | Use server time for L2 signing (`true` / `false`) | `false` |
 | `CLOSE_AFTER_SECONDS` | Optional timed close from open time (0 = disabled) | `0` |
+| `PAPER_MODE` | Simulate orders and track PnL locally (no real CLOB trades) | `false` |
+| `WEBHOOK_URL` | Optional POST URL when a paper position settles (e.g. n8n) | (empty) |
 | **Optional LLM** | | |
 | `OPENAI_API_KEY` | If set, features are sent to the LLM for an extra bias signal | (empty = no LLM) |
 | `OPENAI_BASE_URL` | OpenAI-compatible API base | `https://api.openai.com/v1` |
