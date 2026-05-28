@@ -82,34 +82,38 @@ async function loop() {
     if (cfg.paperMode) {
       paperTrader.onMarketTick(marketId, features.yesPrice, marketMeta.remainingSec);
 
+      if (!canEnterByConfidence) {
+        action = `HOLD | low confidence (${pred.confidence.toFixed(2)} < ${cfg.confidenceThreshold.toFixed(2)})`;
+      } else {
       const canEnterPaperByTime =
         marketMeta.remainingSec < 0 || marketMeta.remainingSec > cfg.forceExitSeconds + 5;
 
-      if (canEnterPaperByTime) {
-        const paperResult = paperTrader.onPrediction(pred, features.yesPrice, signalInputs, {
-          marketId
-        });
-        if (paperResult.startsWith("SKIP")) {
-          action = paperResult;
-          logger.default.info(`  ${paperResult}`);
-        } else if (paperResult.startsWith("OPEN")) {
-          const openMatch = paperResult.match(/^OPEN (YES|NO)/);
-          const paperSide = (openMatch?.[1] ?? side) as "YES" | "NO";
-          const priceLimit =
-            Math.round((paperSide === "YES" ? features.yesPrice : 1 - features.yesPrice) * 100) / 100;
-          const res = await buy("paper-sim", cfg.maxPositionUsd, priceLimit);
-          if (res.success) {
-            paperTrader.openPosition(marketId, paperSide, priceLimit, signalInputs, cfg.maxPositionUsd);
-            logger.default.info(`  PAPER BUY orderID=${res.orderID} status=${res.status}`);
-          } else {
-            logger.default.error(`  PAPER BUY failed: ${res.errorMsg}`);
+        if (canEnterPaperByTime) {
+          const paperResult = paperTrader.onPrediction(pred, features.yesPrice, signalInputs, {
+            marketId
+          });
+          if (paperResult.startsWith("SKIP")) {
+            action = paperResult;
+            logger.default.info(`  ${paperResult}`);
+          } else if (paperResult.startsWith("OPEN")) {
+            const openMatch = paperResult.match(/^OPEN (YES|NO)/);
+            const paperSide = (openMatch?.[1] ?? side) as "YES" | "NO";
+            const priceLimit =
+              Math.round((paperSide === "YES" ? features.yesPrice : 1 - features.yesPrice) * 100) / 100;
+            const res = await buy("paper-sim", cfg.maxPositionUsd, priceLimit);
+            if (res.success) {
+              paperTrader.openPosition(marketId, paperSide, priceLimit, signalInputs, cfg.maxPositionUsd);
+              logger.default.info(`  PAPER BUY orderID=${res.orderID} status=${res.status}`);
+            } else {
+              logger.default.error(`  PAPER BUY failed: ${res.errorMsg}`);
+            }
+            action = paperResult;
+          } else if (paperResult.startsWith("HOLD")) {
+            action = paperResult;
           }
-          action = paperResult;
-        } else if (paperResult.startsWith("HOLD")) {
-          action = paperResult;
+        } else {
+          action = `HOLD | near expiry (${marketMeta.remainingSec}s left)`;
         }
-      } else {
-        action = `HOLD | near expiry (${marketMeta.remainingSec}s left)`;
       }
     }
 
