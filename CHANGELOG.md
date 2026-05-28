@@ -6,6 +6,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+- Added: `src/connectors/binance.ts` and `npm run binance:verify`; `src/engine/features.ts` and `src/engine/predictor.ts` blend BTC momentum (`btcScore`) into signals (`BINANCE_FEATURES_ENABLED=false` to disable).
 - Fixed: `src/main.ts` in `PAPER_MODE` now enforces `CONFIDENCE_THRESHOLD` before calling `paperTrader.onPrediction()`, preventing entries when confidence is below threshold.
 - Fixed: `src/engine/paperTrader.ts`, `src/main.ts`, `src/models/llmScorer.ts`, `src/config.ts`, and `src/engine/features.ts` now persist predictor signals in PAPER close webhook payloads, default unknown whale winrates to `0.5`, and surface/configure OpenAI errors so `llmBias` no longer fails silently.
 - Fixed: `src/engine/paperTrader.ts` and `src/main.ts` enforce one entry per `marketId` per cycle (`enteredMarkets` + loop mutex), reject extreme entry prices, and webhook POST omits `cumulativePnlUsd`/`winRate` (Sheets aggregates).

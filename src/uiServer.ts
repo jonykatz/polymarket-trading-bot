@@ -26,7 +26,7 @@ async function getSnapshot() {
   const whale = await connector.getWhaleFlow(marketId);
   const wallets = (whale.participants ?? []).map((p) => p.wallet);
   const walletWinrates = await getWalletWinrates(wallets);
-  const features = buildFeatures(ticks, whale, walletWinrates);
+  const features = await buildFeatures(ticks, whale, walletWinrates);
   const llmBias = await llm.score(features);
   const pred = predict(features, llmBias);
   const eligibleWallets = (whale.participants ?? [])

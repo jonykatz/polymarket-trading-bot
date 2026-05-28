@@ -6,6 +6,7 @@ export function predict(features: FeatureVector, llmBias: number): Prediction {
   const whaleIntensity = Math.min(1, features.winrateWhaleGross / 10000);
   const z =
     2.2 * features.trendScore +
+    2.0 * features.btcScore +
     2.8 * whaleSignal * whaleIntensity +
     0.8 * llmBias;
 
@@ -19,8 +20,10 @@ export function predict(features: FeatureVector, llmBias: number): Prediction {
     confidence,
     side,
     reason:
-      `trend=${features.trendScore.toFixed(3)} emaSig=${features.emaSignal.toFixed(3)} ` +
-      `rsi=${features.rsi.toFixed(1)} whale=${whaleSignal.toFixed(3)} count=${features.winrateWhaleCount} llm=${llmBias.toFixed(2)}`,
+      `trend=${features.trendScore.toFixed(3)} btc=${features.btcScore.toFixed(3)} ` +
+      `r1m=${(features.btcReturn1m * 100).toFixed(2)}% r5m=${(features.btcReturn5m * 100).toFixed(2)}% ` +
+      `emaSig=${features.emaSignal.toFixed(3)} rsi=${features.rsi.toFixed(1)} ` +
+      `whale=${whaleSignal.toFixed(3)} count=${features.winrateWhaleCount} llm=${llmBias.toFixed(2)}`,
     ts: Date.now()
   };
 }

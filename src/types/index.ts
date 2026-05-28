@@ -43,6 +43,14 @@ export interface FeatureVector {
   winrateWhaleBalance: number;
   winrateWhaleCount: number;
   winrateWhaleGross: number;
+  /** Spot/futures BTCUSDT price from Binance at feature build time. */
+  btcPrice: number;
+  /** Fractional change over ~1m (e.g. 0.001 = +0.1%). */
+  btcReturn1m: number;
+  /** Fractional change over ~5m. */
+  btcReturn5m: number;
+  /** Normalized BTC momentum in [-1, 1] for the predictor. */
+  btcScore: number;
   ts: number;
 }
 
