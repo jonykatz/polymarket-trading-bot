@@ -54,6 +54,19 @@ async function loop() {
     const features = buildFeatures(ticks, whale, walletWinrates);
     const llmBias = await llm.score(features);
     const pred = predict(features, llmBias);
+    const whaleNet = features.winrateWhaleYesPressure - features.winrateWhaleNoPressure;
+    const whaleSignal =
+      features.winrateWhaleGross > 0 ? whaleNet / features.winrateWhaleGross : 0;
+    const signalInputs = {
+      confidenceScore: pred.confidence,
+      confidenceThreshold: cfg.confidenceThreshold,
+      trendScore: features.trendScore,
+      emaSignal: features.emaSignal,
+      rsiValue: features.rsi,
+      whaleSignal,
+      whaleCount: features.winrateWhaleCount,
+      llmBias
+    };
     const canEnterByConfidence = pred.confidence >= cfg.confidenceThreshold;
     const canEnterByTime = marketMeta.remainingSec < 0 || marketMeta.remainingSec > cfg.forceExitSeconds + 5;
     const side = pred.side;
@@ -73,7 +86,9 @@ async function loop() {
         marketMeta.remainingSec < 0 || marketMeta.remainingSec > cfg.forceExitSeconds + 5;
 
       if (canEnterPaperByTime) {
-        const paperResult = paperTrader.onPrediction(pred, features.yesPrice, { marketId });
+        const paperResult = paperTrader.onPrediction(pred, features.yesPrice, signalInputs, {
+          marketId
+        });
         if (paperResult.startsWith("SKIP")) {
           action = paperResult;
           logger.default.info(`  ${paperResult}`);
@@ -84,7 +99,7 @@ async function loop() {
             Math.round((paperSide === "YES" ? features.yesPrice : 1 - features.yesPrice) * 100) / 100;
           const res = await buy("paper-sim", cfg.maxPositionUsd, priceLimit);
           if (res.success) {
-            paperTrader.openPosition(marketId, paperSide, priceLimit, cfg.maxPositionUsd);
+            paperTrader.openPosition(marketId, paperSide, priceLimit, signalInputs, cfg.maxPositionUsd);
             logger.default.info(`  PAPER BUY orderID=${res.orderID} status=${res.status}`);
           } else {
             logger.default.error(`  PAPER BUY failed: ${res.errorMsg}`);

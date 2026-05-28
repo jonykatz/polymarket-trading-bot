@@ -24,7 +24,7 @@ export function buildFeatures(
   let count = 0;
 
   for (const p of whale.participants ?? []) {
-    const wr = walletWinrates.get(p.wallet) ?? 0;
+    const wr = walletWinrates.get(p.wallet) ?? 0.5;
     if (wr < cfg.whaleMinWinrate) continue;
     yesPressure += p.yesNotional * wr;
     noPressure += p.noNotional * wr;

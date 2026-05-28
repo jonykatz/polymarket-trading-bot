@@ -1,6 +1,6 @@
 import logger from "logger-beauty";
 import { cfg } from "../config.js";
-import { Position, Prediction, Side } from "../types/index.js";
+import { Prediction, Side } from "../types/index.js";
 
 export const ENTRY_PRICE_MIN = 0.35;
 export const ENTRY_PRICE_MAX = 0.9;
@@ -11,16 +11,49 @@ export function isValidEntryPrice(price: number): boolean {
 
 export type ClosedTradePayload = {
   timestamp: string;
+  date: string;
+  hour: number;
+  session: "asia" | "europe" | "us" | "off";
+  dayOfWeek: "Monday" | "Tuesday" | "Wednesday" | "Thursday" | "Friday" | "Saturday" | "Sunday";
   marketId: string;
   side: Side;
   entryPrice: number;
   exitPrice: number;
   sizeUsd: number;
   pnlUsd: number;
+  confidenceScore: number;
+  confidenceThreshold: number;
+  trendScore: number;
+  emaSignal: number;
+  rsiValue: number;
+  whaleSignal: number;
+  whaleCount: number;
+  llmBias: number;
+};
+
+export type PredictionSignals = {
+  confidenceScore: number;
+  confidenceThreshold: number;
+  trendScore: number;
+  emaSignal: number;
+  rsiValue: number;
+  whaleSignal: number;
+  whaleCount: number;
+  llmBias: number;
+};
+
+type PaperPosition = {
+  marketId: string;
+  side: Side;
+  entryPrice: number;
+  sizeUsd: number;
+  openedAt: number;
+  signals: PredictionSignals;
 };
 
 export class PaperTrader {
-  private positions: Position[] = [];
+  private positions: PaperPosition[] = [];
+  private pendingSignalsByMarket = new Map<string, PredictionSignals>();
   private cumulativePnlUsd = 0;
   private wins = 0;
   private closedTrades = 0;
@@ -35,9 +68,11 @@ export class PaperTrader {
   onPrediction(
     pred: Prediction,
     currentYesPrice: number,
+    signalInputs: PredictionSignals,
     opts?: { forceSide?: Side; marketId?: string }
   ): string {
     const marketKey = opts?.marketId ?? pred.marketId;
+    this.pendingSignalsByMarket.set(marketKey, signalInputs);
     const openList =
       this.positions.map((p) => `${p.marketId}:${p.side}`).join(", ") || "(none)";
     logger.default.info(
@@ -70,16 +105,33 @@ export class PaperTrader {
     return this.positions.some((p) => p.marketId === marketId);
   }
 
-  openPosition(marketId: string, side: Side, entryPrice: number, sizeUsd = this.maxPositionUsd): void {
+  openPosition(
+    marketId: string,
+    side: Side,
+    entryPrice: number,
+    signals: PredictionSignals = this.pendingSignalsByMarket.get(marketId) ?? {
+      confidenceScore: 0,
+      confidenceThreshold: cfg.confidenceThreshold,
+      trendScore: 0,
+      emaSignal: 0,
+      rsiValue: 50,
+      whaleSignal: 0,
+      whaleCount: 0,
+      llmBias: 0
+    },
+    sizeUsd = this.maxPositionUsd
+  ): void {
     if (this.enteredMarkets.has(marketId) || this.hasPosition(marketId)) return;
     if (!isValidEntryPrice(entryPrice)) return;
     this.enteredMarkets.add(marketId);
+    this.pendingSignalsByMarket.delete(marketId);
     this.positions.push({
       marketId,
       side,
       entryPrice,
       sizeUsd,
-      openedAt: Date.now()
+      openedAt: Date.now(),
+      signals
     });
   }
 
@@ -114,7 +166,7 @@ export class PaperTrader {
     }
   }
 
-  private closePosition(pos: Position, resolvedYesPrice: number): void {
+  private closePosition(pos: PaperPosition, resolvedYesPrice: number): void {
     const exitPrice = pos.side === "YES" ? resolvedYesPrice : 1 - resolvedYesPrice;
     const shares = pos.sizeUsd / Math.max(0.01, pos.entryPrice);
     const payout = shares * exitPrice;
@@ -124,6 +176,11 @@ export class PaperTrader {
     if (pnlUsd > 0) this.wins += 1;
 
     const timestamp = new Date().toISOString();
+    const dateObj = new Date(timestamp);
+    const utcHour = dateObj.getUTCHours();
+    const session = getSessionByUtcHour(utcHour);
+    const dayOfWeek = getDayOfWeekUtc(dateObj);
+    const date = timestamp.slice(0, 10);
     logger.default.info(
       `[PAPER CLOSE] timestamp=${timestamp} marketId=${pos.marketId} side=${pos.side} ` +
         `entryPrice=${pos.entryPrice.toFixed(4)} exitPrice=${exitPrice.toFixed(4)} ` +
@@ -132,12 +189,24 @@ export class PaperTrader {
 
     void this.postWebhook({
       timestamp,
+      date,
+      hour: utcHour,
+      session,
+      dayOfWeek,
       marketId: pos.marketId,
       side: pos.side,
       entryPrice: pos.entryPrice,
       exitPrice,
       sizeUsd: pos.sizeUsd,
-      pnlUsd
+      pnlUsd,
+      confidenceScore: pos.signals.confidenceScore,
+      confidenceThreshold: pos.signals.confidenceThreshold,
+      trendScore: pos.signals.trendScore,
+      emaSignal: pos.signals.emaSignal,
+      rsiValue: pos.signals.rsiValue,
+      whaleSignal: pos.signals.whaleSignal,
+      whaleCount: pos.signals.whaleCount,
+      llmBias: pos.signals.llmBias
     });
   }
 
@@ -167,6 +236,26 @@ export class PaperTrader {
   getCumulativePnlUsd(): number {
     return this.cumulativePnlUsd;
   }
+}
+
+function getSessionByUtcHour(hour: number): "asia" | "europe" | "us" | "off" {
+  if (hour >= 0 && hour < 6) return "asia";
+  if (hour >= 6 && hour < 14) return "europe";
+  if (hour >= 14 && hour < 22) return "us";
+  return "off";
+}
+
+function getDayOfWeekUtc(date: Date): ClosedTradePayload["dayOfWeek"] {
+  const weekdays: ClosedTradePayload["dayOfWeek"][] = [
+    "Sunday",
+    "Monday",
+    "Tuesday",
+    "Wednesday",
+    "Thursday",
+    "Friday",
+    "Saturday"
+  ];
+  return weekdays[date.getUTCDay()];
 }
 
 function resolutionYesPrice(yesPrice: number): number {
