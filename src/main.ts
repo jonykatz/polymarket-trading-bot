@@ -72,7 +72,11 @@ async function loop() {
     const side = pred.side;
     let action = `HOLD | conf=${pred.confidence.toFixed(2)} side=${side}`;
     if (canEnterByConfidence && canEnterByTime) {
-      action = `OPEN ${side} | conf=${pred.confidence.toFixed(2)} ${pred.reason}`;
+      const entryPrice =
+        Math.round((side === "YES" ? features.yesPrice : 1 - features.yesPrice) * 100) / 100;
+      action =
+        `OPEN ${side} sizeUsd=$${cfg.maxPositionUsd} @ ${entryPrice.toFixed(3)} | ` +
+        `conf=${pred.confidence.toFixed(2)} ${pred.reason}`;
     } else if (!canEnterByConfidence) {
       action = `HOLD | low confidence (${pred.confidence.toFixed(2)} < ${cfg.confidenceThreshold.toFixed(2)})`;
     } else if (!canEnterByTime) {
