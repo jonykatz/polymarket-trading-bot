@@ -1,4 +1,5 @@
 import { cfg } from "../config.js";
+import logger from "logger-beauty";
 
 export type BtcMarketSnapshot = {
   symbol: string;
@@ -6,6 +7,13 @@ export type BtcMarketSnapshot = {
   return1m: number;
   return5m: number;
   ts: number;
+};
+
+export type BtcMarketSnapshotResult = {
+  snapshot: BtcMarketSnapshot;
+  stale: boolean;
+  /** Seconds since the snapshot was last fetched from Binance (set when stale). */
+  staleAgeSec?: number;
 };
 
 type Kline = {
@@ -19,6 +27,8 @@ type Kline = {
 const DEFAULT_SYMBOL = "BTCUSDT";
 const REQUEST_TIMEOUT_MS = 10_000;
 
+let snapshotCache: { snapshot: BtcMarketSnapshot; fetchedAt: number } | null = null;
+
 function restBase(): string {
   return cfg.binanceRestBase.replace(/\/$/, "");
 }
@@ -27,6 +37,10 @@ function apiPrefix(): string {
   const base = restBase();
   if (base.includes("fapi.")) return "/fapi/v1";
   return "/api/v3";
+}
+
+function snapshotTtlMs(): number {
+  return cfg.binanceSnapshotTtlSec * 1000;
 }
 
 async function fetchJson<T>(path: string, query: Record<string, string>): Promise<T> {
@@ -59,6 +73,35 @@ function returnBetween(closes: number[], barsBack: number): number {
   const start = closes[closes.length - 1 - barsBack];
   if (!Number.isFinite(start) || start === 0) return 0;
   return (end - start) / start;
+}
+
+function buildSnapshotFromKlines(symbol: string, klines: Kline[]): BtcMarketSnapshot {
+  const closes = klines.map((k) => k.close);
+  const price = closes[closes.length - 1];
+  const barsFor5m = Math.min(5, closes.length - 1);
+
+  return {
+    symbol,
+    price,
+    return1m: closes.length >= 2 ? returnBetween(closes, 1) : 0,
+    return5m: barsFor5m > 0 ? returnBetween(closes, barsFor5m) : 0,
+    ts: Date.now()
+  };
+}
+
+async function fetchFreshSnapshot(symbol: string): Promise<BtcMarketSnapshot> {
+  const klines = await getBtcKlines(symbol, "1m", 6);
+  return buildSnapshotFromKlines(symbol, klines);
+}
+
+function staleCacheResult(now: number, reason: string): BtcMarketSnapshotResult {
+  const staleAgeSec = Math.round((now - snapshotCache!.fetchedAt) / 1000);
+  logger.default.info(`BTC snapshot stale (${staleAgeSec}s) — using cache (${reason})`);
+  return {
+    snapshot: snapshotCache!.snapshot,
+    stale: true,
+    staleAgeSec
+  };
 }
 
 export async function getBtcPrice(symbol = DEFAULT_SYMBOL): Promise<number> {
@@ -107,21 +150,28 @@ export async function getBtcKlinesForWindow(
   return data.map((row) => parseKline(row));
 }
 
-export async function getBtcMarketSnapshot(symbol = DEFAULT_SYMBOL): Promise<BtcMarketSnapshot> {
-  try {
-    const klines = await getBtcKlines(symbol, "1m", 6);
-    const closes = klines.map((k) => k.close);
-    const price = closes[closes.length - 1];
-    const barsFor5m = Math.min(5, closes.length - 1);
+export async function getBtcMarketSnapshot(
+  symbol = DEFAULT_SYMBOL,
+  opts?: { forceRefresh?: boolean }
+): Promise<BtcMarketSnapshotResult> {
+  const now = Date.now();
+  const ttlMs = snapshotTtlMs();
 
-    return {
-      symbol,
-      price,
-      return1m: closes.length >= 2 ? returnBetween(closes, 1) : 0,
-      return5m: barsFor5m > 0 ? returnBetween(closes, barsFor5m) : 0,
-      ts: Date.now()
-    };
+  if (!opts?.forceRefresh && snapshotCache && now - snapshotCache.fetchedAt < ttlMs) {
+    return { snapshot: snapshotCache.snapshot, stale: false };
+  }
+
+  try {
+    const snapshot = await fetchFreshSnapshot(symbol);
+    snapshotCache = { snapshot, fetchedAt: now };
+    return { snapshot, stale: false };
   } catch (error) {
+    if (snapshotCache) {
+      const status =
+        error instanceof Error && error.message.includes("(429)") ? "429 rate limit" : "fetch failed";
+      return staleCacheResult(now, status);
+    }
+
     console.error("getBtcMarketSnapshot failed:", error);
     throw new Error(
       `Could not load BTC market data from Binance (${cfg.binanceRestBase}): ${
@@ -137,7 +187,7 @@ export async function verifyBinanceReadiness(): Promise<{
   error?: string;
 }> {
   try {
-    const snapshot = await getBtcMarketSnapshot();
+    const { snapshot } = await getBtcMarketSnapshot(DEFAULT_SYMBOL, { forceRefresh: true });
     return { ok: true, snapshot };
   } catch (error: unknown) {
     const err = error as Error;

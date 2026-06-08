@@ -51,6 +51,10 @@ export interface FeatureVector {
   btcReturn5m: number;
   /** Normalized BTC momentum in [-1, 1] for the predictor. */
   btcScore: number;
+  /** True when btcScore comes from a cached Binance snapshot (REST failed or TTL reuse). */
+  btcSnapshotStale: boolean;
+  /** Age in seconds of the cached snapshot when `btcSnapshotStale` is true. */
+  btcSnapshotAgeSec?: number;
   ts: number;
 }
 

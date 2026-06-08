@@ -6,6 +6,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+- Added: `src/connectors/binance.ts` 60s BTC snapshot cache with stale fallback on REST failures (429); `src/engine/features.ts` and `src/engine/predictor.ts` expose `btc=STALE` in logs when using cached data (`BINANCE_SNAPSHOT_TTL_SEC`).
 - Added: `src/connectors/binance.ts` and `npm run binance:verify`; `src/engine/features.ts` and `src/engine/predictor.ts` blend BTC momentum (`btcScore`) into signals (`BINANCE_FEATURES_ENABLED=false` to disable).
 - Fixed: `src/main.ts` in `PAPER_MODE` now enforces `CONFIDENCE_THRESHOLD` before calling `paperTrader.onPrediction()`, preventing entries when confidence is below threshold.
 - Fixed: `src/engine/paperTrader.ts`, `src/main.ts`, `src/models/llmScorer.ts`, `src/config.ts`, and `src/engine/features.ts` now persist predictor signals in PAPER close webhook payloads, default unknown whale winrates to `0.5`, and surface/configure OpenAI errors so `llmBias` no longer fails silently.

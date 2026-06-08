@@ -11,6 +11,7 @@ export const cfg = {
   polymarketDataApiBase: process.env.POLYMARKET_DATA_API_BASE ?? "https://data-api.polymarket.com",
   binanceRestBase: process.env.BINANCE_REST_BASE ?? "https://fapi.binance.com",
   binanceFeaturesEnabled: envBool(process.env.BINANCE_FEATURES_ENABLED, true),
+  binanceSnapshotTtlSec: Number(process.env.BINANCE_SNAPSHOT_TTL_SEC ?? 60),
   openaiApiKey: process.env.OPENAI_API_KEY?.trim() || undefined,
   openaiBaseUrl: (process.env.OPENAI_BASE_URL ?? "").trim() || "https://api.openai.com/v1",
   openaiModel: (process.env.OPENAI_MODEL ?? "").trim() || "gpt-4o-mini",

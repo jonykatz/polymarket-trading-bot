@@ -56,6 +56,8 @@ export async function buildFeatures(
     btcReturn1m: btc.btcReturn1m,
     btcReturn5m: btc.btcReturn5m,
     btcScore: btc.btcScore,
+    btcSnapshotStale: btc.btcSnapshotStale,
+    btcSnapshotAgeSec: btc.btcSnapshotAgeSec,
     ts: Date.now()
   };
 }
@@ -65,19 +67,29 @@ async function loadBtcFeatures(): Promise<{
   btcReturn1m: number;
   btcReturn5m: number;
   btcScore: number;
+  btcSnapshotStale: boolean;
+  btcSnapshotAgeSec?: number;
 }> {
-  const zero = { btcPrice: 0, btcReturn1m: 0, btcReturn5m: 0, btcScore: 0 };
+  const zero = {
+    btcPrice: 0,
+    btcReturn1m: 0,
+    btcReturn5m: 0,
+    btcScore: 0,
+    btcSnapshotStale: false
+  };
   if (!cfg.binanceFeaturesEnabled) return zero;
 
   try {
-    const snap = await getBtcMarketSnapshot();
-    const blended = 0.4 * snap.return1m + 0.6 * snap.return5m;
+    const { snapshot, stale, staleAgeSec } = await getBtcMarketSnapshot();
+    const blended = 0.4 * snapshot.return1m + 0.6 * snapshot.return5m;
     const btcScore = clamp1(blended / BTC_RETURN_SCALE);
     return {
-      btcPrice: snap.price,
-      btcReturn1m: snap.return1m,
-      btcReturn5m: snap.return5m,
-      btcScore
+      btcPrice: snapshot.price,
+      btcReturn1m: snapshot.return1m,
+      btcReturn5m: snapshot.return5m,
+      btcScore,
+      btcSnapshotStale: stale,
+      btcSnapshotAgeSec: staleAgeSec
     };
   } catch (error) {
     console.error("BTC features unavailable:", error);
