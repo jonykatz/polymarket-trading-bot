@@ -7,7 +7,8 @@ import {
   getAccountBalance,
   getTokenIdsForCondition,
   probeTokenAskBook,
-  probeTokenBidBook
+  probeTokenBidBook,
+  type PlaceOrderResult
 } from "./connectors/orderExecution.js";
 import { getWalletWinrates } from "./connectors/walletPerformance.js";
 import { buildFeatures } from "./engine/features.js";
@@ -147,6 +148,43 @@ async function resolveLiveSellPricing(
 function estimateEntryFeeUsd(notionalUsd: number, feeRateBps: number): number {
   if (notionalUsd <= 0 || feeRateBps <= 0) return 0;
   return roundPrice((notionalUsd * feeRateBps) / 10000);
+}
+
+type LiveEntryFill = {
+  sizeShares: number;
+  sizeUsd: number;
+  entryPriceReal: number;
+  expectedShares: number;
+};
+
+/** Resolve actual CLOB fill size for a live FAK buy (no estimated shares). */
+function resolveLiveEntryFill(
+  res: PlaceOrderResult,
+  priceLimit: number,
+  plannedUsd: number
+): LiveEntryFill | null {
+  const entryPriceReal = res.fillPrice ?? priceLimit;
+  if (entryPriceReal <= 0) return null;
+
+  const expectedShares = Math.floor((plannedUsd / entryPriceReal) * 100) / 100;
+
+  if (res.fillShares != null && res.fillShares > 0) {
+    const sizeShares = Math.floor(res.fillShares * 100) / 100;
+    const sizeUsd =
+      res.fillUsd != null && res.fillUsd > 0
+        ? roundMoney(res.fillUsd)
+        : roundMoney(sizeShares * entryPriceReal);
+    return { sizeShares, sizeUsd, entryPriceReal, expectedShares };
+  }
+
+  if (res.fillUsd != null && res.fillUsd > 0) {
+    const sizeUsd = roundMoney(res.fillUsd);
+    const sizeShares = Math.floor((sizeUsd / entryPriceReal) * 100) / 100;
+    if (sizeShares <= 0) return null;
+    return { sizeShares, sizeUsd, entryPriceReal, expectedShares };
+  }
+
+  return null;
 }
 
 function stopBot(): void {
@@ -659,45 +697,56 @@ async function loop() {
 
               const res = await buy(tokenId, cfg.maxPositionUsd, priceLimit, liveOrderOpts);
               if (res.success) {
-                const entryPriceReal = res.fillPrice ?? priceLimit;
-                const sizeShares =
-                  res.fillShares != null && res.fillShares > 0
-                    ? Math.floor(res.fillShares * 100) / 100
-                    : Math.floor((cfg.maxPositionUsd / Math.max(0.01, entryPriceReal)) * 100) / 100;
-                const sizeUsd = res.fillUsd ?? cfg.maxPositionUsd;
-                const feeRateBps = res.feeRateBps ?? 0;
-                addPosition({
-                  marketId,
-                  conditionId,
-                  side,
-                  tokenId,
-                  sizeShares,
-                  openedAt: Date.now(),
-                  entryPrice: quotePrice,
-                  entryPriceReal,
-                  entryPriceLimit: priceLimit,
-                  entryOrderId: res.orderID,
-                  entryStatus: res.status,
-                  entryAttemptCount: 1,
-                  pUp5mAtEntry: pred.pUp5m,
-                  sizeUsd: roundMoney(sizeUsd),
-                  slippageEntry: roundPrice(entryPriceReal - quotePrice),
-                  feeRateBps,
-                  entryFeeUsd: estimateEntryFeeUsd(sizeUsd, feeRateBps),
-                  balanceUsdcAtEntry,
-                  signals: signalInputs
-                });
-                if (singleTradeMode) {
-                  singleTradeEntered = true;
-                  singleTradeMarketId = marketId;
-                  logger.default.info(`  SINGLE-TRADE entered ${marketId}; waiting for market close…`);
+                const fill = resolveLiveEntryFill(res, priceLimit, cfg.maxPositionUsd);
+                if (!fill) {
+                  const failCount = priorFakFails + 1;
+                  fakFailCountByMarket.set(marketId, failCount);
+                  action = `SKIP | FAK buy missing fill data (${failCount}/${MAX_FAK_BUY_ATTEMPTS}) ${marketId}`;
+                  logger.default.error(
+                    `  LIVE BUY succeeded but CLOB returned no fillShares/fillUsd for ${marketId}`
+                  );
+                } else {
+                  const { sizeShares, sizeUsd, entryPriceReal, expectedShares } = fill;
+                  if (sizeShares + PARTIAL_FILL_EPS_SHARES < expectedShares) {
+                    logger.default.warn(
+                      `  LIVE BUY partial fill: got ${sizeShares}/${expectedShares} shares`
+                    );
+                  }
+                  const feeRateBps = res.feeRateBps ?? 0;
+                  addPosition({
+                    marketId,
+                    conditionId,
+                    side,
+                    tokenId,
+                    sizeShares,
+                    openedAt: Date.now(),
+                    entryPrice: quotePrice,
+                    entryPriceReal,
+                    entryPriceLimit: priceLimit,
+                    entryOrderId: res.orderID,
+                    entryStatus: res.status,
+                    entryAttemptCount: 1,
+                    pUp5mAtEntry: pred.pUp5m,
+                    sizeUsd,
+                    slippageEntry: roundPrice(entryPriceReal - quotePrice),
+                    feeRateBps,
+                    entryFeeUsd: estimateEntryFeeUsd(sizeUsd, feeRateBps),
+                    balanceUsdcAtEntry,
+                    signals: signalInputs
+                  });
+                  if (singleTradeMode) {
+                    singleTradeEntered = true;
+                    singleTradeMarketId = marketId;
+                    logger.default.info(`  SINGLE-TRADE entered ${marketId}; waiting for market close…`);
+                  }
+                  action =
+                    `OPEN ${side} sizeUsd=$${sizeUsd.toFixed(2)} @ ${quotePrice.toFixed(3)} | ` +
+                    `conf=${pred.confidence.toFixed(2)} ${pred.reason}`;
+                  logger.default.info(
+                    `  LIVE BUY orderID=${res.orderID} status=${res.status} fill=${entryPriceReal.toFixed(4)} ` +
+                      `shares=${sizeShares} usd=${sizeUsd.toFixed(2)}`
+                  );
                 }
-                action =
-                  `OPEN ${side} sizeUsd=$${cfg.maxPositionUsd} @ ${quotePrice.toFixed(3)} | ` +
-                  `conf=${pred.confidence.toFixed(2)} ${pred.reason}`;
-                logger.default.info(
-                  `  LIVE BUY orderID=${res.orderID} status=${res.status} fill=${entryPriceReal.toFixed(4)}`
-                );
               } else {
                 const failCount = priorFakFails + 1;
                 fakFailCountByMarket.set(marketId, failCount);

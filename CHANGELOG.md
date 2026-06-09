@@ -6,6 +6,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+- Added: Live FAK entry positions store actual CLOB `fillShares` and `fillUsd`, with a partial-fill warning when filled size is below planned (`main.ts`).
 - Added: `npm run pm2:deploy` to build, restart PM2, and tail logs in one command (`package.json`).
 - Added: Entry spread guard (`ENTRY_BOOK_MAX_SPREAD`), partial-fill sell retries via `updatePosition`, and `EXIT_SKIP` webhook when the bid book is empty (`main.ts`, `positionStore.ts`, `sheetsEvent.ts`, `config.ts`).
 - Changed: Live FAK sells use CLOB best-bid pricing with `EXIT_BOOK_SLIPPAGE` / `EXIT_BOOK_SLIPPAGE_URGENT`, skip when the bid book is empty, and log thin-book depth warnings (`orderExecution.ts`, `paperTrader.ts`, `main.ts`, `config.ts`).
