@@ -4,3 +4,4 @@ dist
 .data/
 open-positions.json
 logs/
+docs/
