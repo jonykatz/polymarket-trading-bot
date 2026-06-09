@@ -90,6 +90,8 @@ npm run pm2:deploy   # rebuild + restart + tail logs (one command)
 
 Logs also go to `logs/pm2-out.log` and `logs/pm2-error.log`. Optional: `npx pm2 startup` then follow its `sudo` hint so pm2 survives reboot.
 
+**DigitalOcean droplet:** see [DROPLET.md](DROPLET.md) for SSH, PM2, logs, and deploy commands.
+
 The bot places real orders when confidence and timing gates pass. It logs `LIVE BUY orderID=...`, records positions in `open-positions.json`, and force-closes near expiry (default 3s before settlement).
 
 ### 3. 📊 (Optional) Run the Compare UI
