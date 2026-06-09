@@ -6,6 +6,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+- Changed: Live and `single-trade` POST flat Sheets payloads to `WEBHOOK_URL` (n8n) instead of stdout JSON; emits `SIGNAL_SKIP`, `ENTRY_FAK_FAILED`, `TRADE_CLOSED_FOK`, and `TRADE_CLOSED_SETTLE` (`src/engine/sheetsEvent.ts`, `src/main.ts`, `src/engine/liveTrader.ts`).
 - Added: `TRADE_CLOSED_SETTLE` JSON when live SELL fails after market resolution — `recordType`, `exitMethod`, `settlementOutcome`, `exitErrorMsg` on close payloads; Gamma resolution via `PolymarketConnector.getMarketResolution()` (`src/main.ts`, `src/engine/liveTrader.ts`, `src/connectors/polymarket.ts`).
 - Changed: Live close JSON always emits `balanceUsdcAtEntry`, `balanceUsdcAtExit`, and `polymarketFeePct` (null when unavailable) with rounded prices for n8n/Sheets; fee USD reconciled from wallet balance delta when snapshots exist (`src/engine/tradeWebhook.ts`, `src/main.ts`, `src/engine/liveTrader.ts`).
 - Added: `ENTRY_SLIPPAGE` (default `0.05`) in `src/config.ts` — live buys use quote + slippage capped at `ENTRY_PRICE_MAX` (`src/engine/paperTrader.ts`, `src/main.ts`); paper unchanged.

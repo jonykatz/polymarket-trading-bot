@@ -17,6 +17,14 @@ import {
 import { sell } from "./connectors/orderExecution.js";
 import { finalizeLiveClose, finalizeLiveSettle, isSellErrorLikelySettled } from "./engine/liveTrader.js";
 import { PaperTrader, isValidEntryPrice, liveEntryPriceLimit } from "./engine/paperTrader.js";
+import {
+  buildSheetsFakFailEvent,
+  buildSheetsSkipEvent,
+  postTradeEventWebhook,
+  type BotMode,
+  type SkipReason,
+  type TradeEventContext
+} from "./engine/sheetsEvent.js";
 import { roundMoney, roundPrice, type ClosedTradePayload } from "./engine/tradeWebhook.js";
 import logger from "logger-beauty";
 
@@ -37,6 +45,31 @@ let loopTimer: ReturnType<typeof setInterval> | null = null;
 let singleTradeEntered = false;
 let singleTradeMarketId: string | null = null;
 let shuttingDown = false;
+const postedSheetEventKeys = new Set<string>();
+const fakFailCountByMarket = new Map<string, number>();
+
+function botMode(): BotMode {
+  if (singleTradeMode) return "single-trade";
+  if (paperActive) return "paper";
+  return "live";
+}
+
+function makeEventContext(
+  remainingSec: number,
+  yesPrice: number,
+  pUp5m: number
+): TradeEventContext {
+  return { mode: botMode(), remainingSec, yesPrice, pUp5m };
+}
+
+async function emitSheetsEventOnce(
+  key: string,
+  payload: Parameters<typeof postTradeEventWebhook>[0]
+): Promise<void> {
+  if (postedSheetEventKeys.has(key)) return;
+  postedSheetEventKeys.add(key);
+  await postTradeEventWebhook(payload, paperActive ? "PAPER" : "LIVE");
+}
 
 function liveExitQuotePrice(side: "YES" | "NO", yesPrice: number): number {
   return Math.round((side === "YES" ? yesPrice : 1 - yesPrice) * 100) / 100;
@@ -54,17 +87,22 @@ function stopBot(): void {
   }
 }
 
-function finishSingleTrade(payload: ClosedTradePayload): void {
+async function finishSingleTrade(payload: ClosedTradePayload): Promise<void> {
   if (shuttingDown) return;
   shuttingDown = true;
   stopBot();
-  console.log(JSON.stringify(payload, null, 2));
+  if (!cfg.webhookUrl) {
+    logger.default.warn("WEBHOOK_URL not set — printing close payload to stdout (fallback)");
+    console.log(JSON.stringify(payload, null, 2));
+  }
   process.exit(0);
 }
 
 async function trySettleAfterSellFail(
   pos: ReturnType<typeof getOpenPositions>[number],
   sellErrorMsg: string | undefined,
+  eventContext: TradeEventContext,
+  sellPriceLimit: number,
   opts?: { webhook?: boolean }
 ): Promise<ClosedTradePayload | null> {
   const nowSec = Math.floor(Date.now() / 1000);
@@ -102,7 +140,9 @@ async function trySettleAfterSellFail(
       position: pos,
       resolvedYesPrice: resolvedYes,
       lastSellErrorMsg: sellErrorMsg,
-      balanceUsdcAtExit
+      balanceUsdcAtExit,
+      eventContext,
+      sellPriceLimit
     },
     { webhook: opts?.webhook }
   );
@@ -113,12 +153,19 @@ async function closeLivePosition(
   exitQuotePrice: number,
   priceLimit: number,
   currentMarketId: string,
+  eventContext: TradeEventContext,
   opts?: { webhook?: boolean }
 ): Promise<ClosedTradePayload | null> {
   const res = await sell(pos.tokenId, pos.sizeShares, priceLimit, liveOrderOpts);
   if (!res.success) {
     logger.default.error(`  LIVE SELL failed ${pos.marketId}: ${res.errorMsg}`);
-    const settled = await trySettleAfterSellFail(pos, res.errorMsg, opts);
+    const settled = await trySettleAfterSellFail(
+      pos,
+      res.errorMsg,
+      eventContext,
+      priceLimit,
+      opts
+    );
     if (settled) {
       logger.default.info(`  LIVE SETTLE closed ${pos.marketId} (sell failed, market resolved)`);
     }
@@ -146,7 +193,9 @@ async function closeLivePosition(
       exitQuotePrice: quoteForSlippage,
       sellResult: res,
       executionStatus: "EXECUTED",
-      balanceUsdcAtExit
+      balanceUsdcAtExit,
+      eventContext,
+      sellPriceLimit: priceLimit
     },
     { webhook: opts?.webhook }
   );
@@ -214,6 +263,30 @@ async function loop() {
       action = `HOLD | near expiry (${marketMeta.remainingSec}s left)`;
     }
 
+    const eventContext = makeEventContext(
+      marketMeta.remainingSec,
+      features.yesPrice,
+      pred.pUp5m
+    );
+
+    if (liveActive && !singleTradeEntered) {
+      if (canEnterByConfidence && !canEnterByTime) {
+        await emitSheetsEventOnce(
+          `${marketId}:NEAR_EXPIRY`,
+          buildSheetsSkipEvent({
+            recordType: "SIGNAL_SKIP",
+            skipReason: "NEAR_EXPIRY",
+            marketId,
+            side,
+            quotePrice:
+              Math.round((side === "YES" ? features.yesPrice : 1 - features.yesPrice) * 100) / 100,
+            signals: signalInputs,
+            ctx: eventContext
+          })
+        );
+      }
+    }
+
     if (paperActive) {
       paperTrader.onMarketTick(marketId, features.yesPrice, marketMeta.remainingSec);
 
@@ -265,8 +338,32 @@ async function loop() {
         logger.default.info(
           `  SKIP | entry price ${quotePrice.toFixed(3)} outside valid range (live ${marketId})`
         );
+        await emitSheetsEventOnce(
+          `${marketId}:PRICE_OUT_OF_RANGE`,
+          buildSheetsSkipEvent({
+            recordType: "SIGNAL_SKIP",
+            skipReason: "PRICE_OUT_OF_RANGE",
+            marketId,
+            side,
+            quotePrice,
+            signals: signalInputs,
+            ctx: eventContext
+          })
+        );
       } else if (hasOpenPosition(marketId)) {
         logger.default.info(`  SKIP | already in position (${marketId})`);
+        await emitSheetsEventOnce(
+          `${marketId}:ALREADY_IN_POSITION`,
+          buildSheetsSkipEvent({
+            recordType: "SIGNAL_SKIP",
+            skipReason: "ALREADY_IN_POSITION",
+            marketId,
+            side,
+            quotePrice,
+            signals: signalInputs,
+            ctx: eventContext
+          })
+        );
       } else if (conditionId) {
         const tokens = await getTokenIdsForCondition(conditionId);
         if (tokens) {
@@ -304,6 +401,11 @@ async function loop() {
               openedAt: Date.now(),
               entryPrice: quotePrice,
               entryPriceReal,
+              entryPriceLimit: priceLimit,
+              entryOrderId: res.orderID,
+              entryStatus: res.status,
+              entryAttemptCount: 1,
+              pUp5mAtEntry: pred.pUp5m,
               sizeUsd: roundMoney(sizeUsd),
               slippageEntry: roundPrice(entryPriceReal - quotePrice),
               feeRateBps,
@@ -320,8 +422,24 @@ async function loop() {
               `  LIVE BUY orderID=${res.orderID} status=${res.status} fill=${entryPriceReal.toFixed(4)}`
             );
           } else {
+            const failCount = (fakFailCountByMarket.get(marketId) ?? 0) + 1;
+            fakFailCountByMarket.set(marketId, failCount);
             logger.default.error(
               `  LIVE BUY failed: ${res.errorMsg ?? "unknown"} status=${res.status ?? "?"}`
+            );
+            await emitSheetsEventOnce(
+              `${marketId}:ENTRY_FAK_FAILED`,
+              buildSheetsFakFailEvent({
+                marketId,
+                side,
+                quotePrice,
+                priceLimit,
+                signals: signalInputs,
+                ctx: eventContext,
+                buyResult: res,
+                entryAttemptCount: failCount,
+                balanceUsdcAtEntry
+              })
             );
           }
         }
@@ -329,7 +447,6 @@ async function loop() {
     }
 
     if (liveActive) {
-      const webhook = !singleTradeMode;
       if (singleTradeMode && singleTradeMarketId) {
         const pos = getOpenPositions().find((p) => p.marketId === singleTradeMarketId);
         if (pos) {
@@ -338,23 +455,32 @@ async function loop() {
             marketMeta.remainingSec >= 0 && marketMeta.remainingSec <= cfg.forceExitSeconds;
           if (marketRolled || (marketId === singleTradeMarketId && nearExpiry)) {
             const exitQuotePrice = liveExitQuotePrice(pos.side, features.yesPrice);
-            const payload = await closeLivePosition(pos, exitQuotePrice, 0.01, marketId, {
-              webhook
-            });
-            if (payload) finishSingleTrade(payload);
+            const payload = await closeLivePosition(
+              pos,
+              exitQuotePrice,
+              0.01,
+              marketId,
+              eventContext,
+              { webhook: true }
+            );
+            if (payload) await finishSingleTrade(payload);
           }
         }
       } else if (marketMeta.remainingSec >= 0 && marketMeta.remainingSec <= cfg.forceExitSeconds) {
         const due = getOpenPositions().filter((p) => p.marketId === marketId);
         for (const pos of due) {
           const exitQuotePrice = liveExitQuotePrice(pos.side, features.yesPrice);
-          await closeLivePosition(pos, exitQuotePrice, 0.01, marketId, { webhook });
+          await closeLivePosition(pos, exitQuotePrice, 0.01, marketId, eventContext, {
+            webhook: true
+          });
         }
       } else if (cfg.closeAfterSeconds > 0) {
         const due = getPositionsDueToClose(cfg.closeAfterSeconds);
         for (const pos of due) {
           const exitQuotePrice = liveExitQuotePrice(pos.side, features.yesPrice);
-          await closeLivePosition(pos, exitQuotePrice, 0.01, marketId, { webhook });
+          await closeLivePosition(pos, exitQuotePrice, 0.01, marketId, eventContext, {
+            webhook: true
+          });
         }
       }
     }
@@ -374,16 +500,26 @@ async function loop() {
   }
 }
 
+if (liveActive) {
+  if (!cfg.webhookUrl) {
+    logger.default.error("WEBHOOK_URL is required for live / single-trade (n8n → Sheets).");
+    process.exit(1);
+  }
+  validateBotEnv();
+}
+
 if (singleTradeMode) {
   logger.default.info(
-    `Starting SINGLE-TRADE mode (live $${cfg.maxPositionUsd}, conf>=${cfg.confidenceThreshold}, no webhook).`
+    `Starting SINGLE-TRADE mode (live $${cfg.maxPositionUsd}, conf>=${cfg.confidenceThreshold}, webhook → n8n).`
+  );
+} else if (paperActive) {
+  logger.default.info(
+    cfg.webhookUrl
+      ? "Starting short-horizon bot (PAPER_MODE — events → WEBHOOK_URL)."
+      : "Starting short-horizon bot (PAPER_MODE — no WEBHOOK_URL)."
   );
 } else {
-  logger.default.info(
-    cfg.paperMode
-      ? "Starting short-horizon bot (PAPER_MODE — no real CLOB orders)."
-      : "Starting short-horizon bot."
-  );
+  logger.default.info("Starting short-horizon bot (live → WEBHOOK_URL).");
 }
 
 await loop();

@@ -5,13 +5,17 @@ import type { Side } from "../types/index.js";
 import {
   buildClosedTradePayload,
   defaultPredictionSignals,
-  postClosedTradeWebhook,
   roundMoney,
   roundPrice,
   type ExecutionStatus,
   type PredictionSignals,
   type SettlementOutcome
 } from "./tradeWebhook.js";
+import {
+  buildSheetsEventFromClose,
+  postTradeEventWebhook,
+  type TradeEventContext
+} from "./sheetsEvent.js";
 
 export type LiveCloseInput = {
   position: LivePosition;
@@ -20,6 +24,8 @@ export type LiveCloseInput = {
   executionStatus?: ExecutionStatus;
   /** CLOB USDC balance after the sell settles. */
   balanceUsdcAtExit?: number;
+  eventContext: TradeEventContext;
+  sellPriceLimit?: number;
 };
 
 function resolveSignals(position: LivePosition): PredictionSignals {
@@ -68,6 +74,8 @@ export type LiveSettleInput = {
   resolvedYesPrice: number;
   lastSellErrorMsg?: string;
   balanceUsdcAtExit?: number;
+  eventContext: TradeEventContext;
+  sellPriceLimit?: number;
 };
 
 export function buildLiveSettlePayload(input: LiveSettleInput) {
@@ -129,7 +137,11 @@ export async function finalizeLiveSettle(
       `fee=${payload.polymarketFee.toFixed(4)}`
   );
   if (opts?.webhook !== false) {
-    await postClosedTradeWebhook(payload, "LIVE");
+    const sheets = buildSheetsEventFromClose(payload, input.eventContext, input.position, {
+      priceLimit: input.sellPriceLimit,
+      errorMsg: input.lastSellErrorMsg
+    });
+    await postTradeEventWebhook(sheets, "LIVE");
   }
   return payload;
 }
@@ -203,7 +215,12 @@ export async function finalizeLiveClose(
       `pnlGross=${payload.pnlGross.toFixed(2)} pnlNet=${payload.pnlNet.toFixed(2)} fee=${payload.polymarketFee.toFixed(4)}`
   );
   if (opts?.webhook !== false) {
-    await postClosedTradeWebhook(payload, "LIVE");
+    const sheets = buildSheetsEventFromClose(payload, input.eventContext, input.position, {
+      orderId: input.sellResult.orderID,
+      status: input.sellResult.status,
+      priceLimit: input.sellPriceLimit
+    });
+    await postTradeEventWebhook(sheets, "LIVE");
   }
   return payload;
 }

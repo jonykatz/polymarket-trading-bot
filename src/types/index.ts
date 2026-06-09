@@ -98,6 +98,11 @@ export interface LivePosition {
   entryFeeUsd?: number;
   /** CLOB USDC balance snapshot immediately before the buy. */
   balanceUsdcAtEntry?: number;
+  entryPriceLimit?: number;
+  entryOrderId?: string;
+  entryStatus?: string;
+  entryAttemptCount?: number;
+  pUp5mAtEntry?: number;
   /** Predictor signals at entry for close webhook. */
   signals?: PredictionSignals;
 }

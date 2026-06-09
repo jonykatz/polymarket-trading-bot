@@ -140,6 +140,9 @@ export function validateBotEnv(): void {
   if (cfg.walletWinrateApiUrl.trim() && !validHttpUrl(cfg.walletWinrateApiUrl)) {
     errors.push("WALLET_WINRATE_API_URL must be a valid http(s) URL.");
   }
+  if (cfg.webhookUrl && !validHttpUrl(cfg.webhookUrl)) {
+    errors.push(`WEBHOOK_URL must be a valid http(s) URL (got "${cfg.webhookUrl}").`);
+  }
 
   if (errors.length) {
     console.error(
