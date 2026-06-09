@@ -90,12 +90,23 @@ export function buildLiveClosePayload(input: LiveCloseInput) {
   });
 }
 
-export async function notifyLiveClose(input: LiveCloseInput): Promise<void> {
+export async function finalizeLiveClose(
+  input: LiveCloseInput,
+  opts?: { webhook?: boolean }
+): Promise<ReturnType<typeof buildLiveClosePayload>> {
   const payload = buildLiveClosePayload(input);
   logger.default.info(
     `[LIVE CLOSE] timestamp=${payload.timestamp} marketId=${payload.marketId} side=${payload.side} ` +
       `entryReal=${payload.entryPriceReal.toFixed(4)} exitReal=${payload.exitPriceReal.toFixed(4)} ` +
       `pnlGross=${payload.pnlGross.toFixed(2)} pnlNet=${payload.pnlNet.toFixed(2)} fee=${payload.polymarketFee.toFixed(4)}`
   );
-  await postClosedTradeWebhook(payload, "LIVE");
+  if (opts?.webhook !== false) {
+    await postClosedTradeWebhook(payload, "LIVE");
+  }
+  return payload;
+}
+
+/** @deprecated Use finalizeLiveClose */
+export async function notifyLiveClose(input: LiveCloseInput): Promise<void> {
+  await finalizeLiveClose(input);
 }

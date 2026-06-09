@@ -364,6 +364,7 @@ export type PlaceOrderParams = {
   size: number;
   price: number;
   orderType?: "GTC" | "FOK" | "FAK";
+  forceLive?: boolean;
 };
 
 export type PlaceOrderResult = {
@@ -423,7 +424,13 @@ async function enrichOrderResult(
   side: "BUY" | "SELL",
   priceFallback: number,
   sizeFallback: number,
-  raw: OrderAmounts & { success?: boolean; orderID?: string; status?: string; errorMsg?: string }
+  raw: OrderAmounts & {
+    success?: boolean;
+    orderID?: string;
+    status?: string | number;
+    errorMsg?: string;
+    error?: string;
+  }
 ): Promise<PlaceOrderResult> {
   let feeRateBps = 0;
   try {
@@ -433,14 +440,41 @@ async function enrichOrderResult(
   }
 
   const fill = parseOrderFill(side, raw, priceFallback, sizeFallback);
+  const errorMsg =
+    raw.errorMsg ??
+    (typeof raw.error === "string" ? raw.error : undefined) ??
+    (raw.error && typeof raw.error === "object" && "error" in raw.error
+      ? String((raw.error as { error?: string }).error)
+      : undefined);
+
+  const statusNum =
+    typeof raw.status === "number"
+      ? raw.status
+      : typeof raw.status === "string" && /^\d+$/.test(raw.status)
+        ? Number(raw.status)
+        : undefined;
+
+  const failed =
+    raw.success === false ||
+    Boolean(errorMsg) ||
+    (statusNum != null && statusNum >= 400) ||
+    (typeof raw.status === "string" &&
+      ["failed", "error", "rejected", "cancelled", "canceled"].includes(raw.status.toLowerCase()));
+
+  const success = !failed && Boolean(raw.orderID || raw.success === true);
+
   return {
-    success: raw.success ?? true,
+    success,
     orderID: raw.orderID,
-    status: raw.status,
-    errorMsg: raw.errorMsg,
+    status: raw.status != null ? String(raw.status) : undefined,
+    errorMsg: success ? undefined : errorMsg ?? "CLOB order rejected",
     ...fill,
     feeRateBps
   };
+}
+
+function shouldSimulateOrder(forceLive = false): boolean {
+  return cfg.paperMode && !forceLive;
 }
 
 function simulatedPaperOrder(params: PlaceOrderParams): PlaceOrderResult {
@@ -453,7 +487,7 @@ function simulatedPaperOrder(params: PlaceOrderParams): PlaceOrderResult {
 }
 
 export async function placeOrder(params: PlaceOrderParams): Promise<PlaceOrderResult> {
-  if (cfg.paperMode) {
+  if (shouldSimulateOrder(params.forceLive)) {
     return simulatedPaperOrder(params);
   }
 
@@ -495,28 +529,32 @@ export async function placeOrder(params: PlaceOrderParams): Promise<PlaceOrderRe
 export async function buy(
   tokenId: string,
   amountUsd: number,
-  priceLimit: number
+  priceLimit: number,
+  opts?: { forceLive?: boolean }
 ): Promise<PlaceOrderResult> {
   return placeOrder({
     tokenId,
     side: "BUY",
     size: amountUsd,
     price: priceLimit,
-    orderType: "FOK"
+    orderType: "FAK",
+    forceLive: opts?.forceLive
   });
 }
 
 export async function sell(
   tokenId: string,
   sizeShares: number,
-  priceLimit: number
+  priceLimit: number,
+  opts?: { forceLive?: boolean }
 ): Promise<PlaceOrderResult> {
   return placeOrder({
     tokenId,
     side: "SELL",
     size: sizeShares,
     price: priceLimit,
-    orderType: "FOK"
+    orderType: "FOK",
+    forceLive: opts?.forceLive
   });
 }
 

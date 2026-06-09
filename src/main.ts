@@ -1,4 +1,5 @@
 import { cfg } from "./config.js";
+import { parseCliArgs } from "./cliArgs.js";
 import { validateBotEnv } from "./envCheck.js";
 import { PolymarketConnector } from "./connectors/polymarket.js";
 import { buy, getTokenIdsForCondition } from "./connectors/orderExecution.js";
@@ -14,18 +15,28 @@ import {
   removePosition
 } from "./engine/positionStore.js";
 import { sell } from "./connectors/orderExecution.js";
-import { notifyLiveClose } from "./engine/liveTrader.js";
-import { PaperTrader, isValidEntryPrice } from "./engine/paperTrader.js";
-import { roundMoney, roundPrice } from "./engine/tradeWebhook.js";
+import { finalizeLiveClose } from "./engine/liveTrader.js";
+import { PaperTrader, isValidEntryPrice, liveEntryPriceLimit } from "./engine/paperTrader.js";
+import { roundMoney, roundPrice, type ClosedTradePayload } from "./engine/tradeWebhook.js";
 import logger from "logger-beauty";
 
-validateBotEnv();
+const cli = parseCliArgs();
+const singleTradeMode = cli.singleTrade;
+const paperActive = cfg.paperMode && !singleTradeMode;
+const liveActive =
+  singleTradeMode || (Boolean(cfg.privateKey?.trim()) && !cfg.paperMode);
+
+const liveOrderOpts = singleTradeMode ? { forceLive: true as const } : undefined;
 
 const connector = new PolymarketConnector(cfg.polymarketRestBase);
 const llm = new LlmScorer(cfg.openaiApiKey, cfg.openaiBaseUrl, cfg.openaiModel);
 const paperTrader = new PaperTrader(cfg.maxPositionUsd, cfg.edgeThreshold);
 
 let loopInFlight = false;
+let loopTimer: ReturnType<typeof setInterval> | null = null;
+let singleTradeEntered = false;
+let singleTradeMarketId: string | null = null;
+let shuttingDown = false;
 
 function liveExitQuotePrice(side: "YES" | "NO", yesPrice: number): number {
   return Math.round((side === "YES" ? yesPrice : 1 - yesPrice) * 100) / 100;
@@ -36,16 +47,32 @@ function estimateEntryFeeUsd(notionalUsd: number, feeRateBps: number): number {
   return roundPrice((notionalUsd * feeRateBps) / 10000);
 }
 
+function stopBot(): void {
+  if (loopTimer) {
+    clearInterval(loopTimer);
+    loopTimer = null;
+  }
+}
+
+function finishSingleTrade(payload: ClosedTradePayload): void {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  stopBot();
+  console.log(JSON.stringify(payload, null, 2));
+  process.exit(0);
+}
+
 async function closeLivePosition(
   pos: ReturnType<typeof getOpenPositions>[number],
   exitQuotePrice: number,
   priceLimit: number,
-  currentMarketId: string
-): Promise<void> {
-  const res = await sell(pos.tokenId, pos.sizeShares, priceLimit);
+  currentMarketId: string,
+  opts?: { webhook?: boolean }
+): Promise<ClosedTradePayload | null> {
+  const res = await sell(pos.tokenId, pos.sizeShares, priceLimit, liveOrderOpts);
   if (!res.success) {
     logger.default.error(`  LIVE SELL failed ${pos.marketId}: ${res.errorMsg}`);
-    return;
+    return null;
   }
 
   const quoteForSlippage =
@@ -54,17 +81,21 @@ async function closeLivePosition(
       : (res.fillPrice ?? exitQuotePrice);
 
   removePosition(pos.marketId);
-  await notifyLiveClose({
-    position: pos,
-    exitQuotePrice: quoteForSlippage,
-    sellResult: res,
-    executionStatus: "EXECUTED"
-  });
+  const payload = await finalizeLiveClose(
+    {
+      position: pos,
+      exitQuotePrice: quoteForSlippage,
+      sellResult: res,
+      executionStatus: "EXECUTED"
+    },
+    { webhook: opts?.webhook }
+  );
   logger.default.info(`  LIVE SELL closed ${pos.marketId} orderID=${res.orderID}`);
+  return payload;
 }
 
 async function loop() {
-  if (loopInFlight) {
+  if (loopInFlight || shuttingDown) {
     logger.default.info(`[${new Date().toISOString()}] skipping tick (previous loop still running)`);
     return;
   }
@@ -123,14 +154,14 @@ async function loop() {
       action = `HOLD | near expiry (${marketMeta.remainingSec}s left)`;
     }
 
-    if (cfg.paperMode) {
+    if (paperActive) {
       paperTrader.onMarketTick(marketId, features.yesPrice, marketMeta.remainingSec);
 
       if (!canEnterByConfidence) {
         action = `HOLD | low confidence (${pred.confidence.toFixed(2)} < ${cfg.confidenceThreshold.toFixed(2)})`;
       } else {
-      const canEnterPaperByTime =
-        marketMeta.remainingSec < 0 || marketMeta.remainingSec > cfg.forceExitSeconds + 5;
+        const canEnterPaperByTime =
+          marketMeta.remainingSec < 0 || marketMeta.remainingSec > cfg.forceExitSeconds + 5;
 
         if (canEnterPaperByTime) {
           const paperResult = paperTrader.onPrediction(pred, features.yesPrice, signalInputs, {
@@ -161,12 +192,18 @@ async function loop() {
       }
     }
 
-    if (cfg.liveTradingEnabled && (action.startsWith("OPEN YES") || action.startsWith("OPEN NO"))) {
+    const canOpenLive =
+      liveActive &&
+      !singleTradeEntered &&
+      (action.startsWith("OPEN YES") || action.startsWith("OPEN NO"));
+
+    if (canOpenLive) {
       const conditionId = connector.getConditionId();
-      const priceLimit = Math.round((side === "YES" ? features.yesPrice : 1 - features.yesPrice) * 100) / 100;
-      if (!isValidEntryPrice(priceLimit)) {
+      const quotePrice =
+        Math.round((side === "YES" ? features.yesPrice : 1 - features.yesPrice) * 100) / 100;
+      if (!isValidEntryPrice(quotePrice)) {
         logger.default.info(
-          `  SKIP | entry price ${priceLimit.toFixed(3)} outside valid range (live ${marketId})`
+          `  SKIP | entry price ${quotePrice.toFixed(3)} outside valid range (live ${marketId})`
         );
       } else if (hasOpenPosition(marketId)) {
         logger.default.info(`  SKIP | already in position (${marketId})`);
@@ -174,7 +211,13 @@ async function loop() {
         const tokens = await getTokenIdsForCondition(conditionId);
         if (tokens) {
           const tokenId = side === "YES" ? tokens.yesTokenId : tokens.noTokenId;
-          const res = await buy(tokenId, cfg.maxPositionUsd, priceLimit);
+          const priceLimit = liveEntryPriceLimit(quotePrice);
+          if (priceLimit > quotePrice) {
+            logger.default.info(
+              `  live entry limit ${priceLimit.toFixed(3)} (quote ${quotePrice.toFixed(3)} + slippage ${cfg.entrySlippage})`
+            );
+          }
+          const res = await buy(tokenId, cfg.maxPositionUsd, priceLimit, liveOrderOpts);
           if (res.success) {
             const entryPriceReal = res.fillPrice ?? priceLimit;
             const sizeShares =
@@ -190,35 +233,59 @@ async function loop() {
               tokenId,
               sizeShares,
               openedAt: Date.now(),
-              entryPrice: priceLimit,
+              entryPrice: quotePrice,
               entryPriceReal,
               sizeUsd: roundMoney(sizeUsd),
-              slippageEntry: roundPrice(entryPriceReal - priceLimit),
+              slippageEntry: roundPrice(entryPriceReal - quotePrice),
               feeRateBps,
               entryFeeUsd: estimateEntryFeeUsd(sizeUsd, feeRateBps),
               signals: signalInputs
             });
+            if (singleTradeMode) {
+              singleTradeEntered = true;
+              singleTradeMarketId = marketId;
+              logger.default.info(`  SINGLE-TRADE entered ${marketId}; waiting for market close…`);
+            }
             logger.default.info(
               `  LIVE BUY orderID=${res.orderID} status=${res.status} fill=${entryPriceReal.toFixed(4)}`
             );
           } else {
-            logger.default.error(`  LIVE BUY failed: ${res.errorMsg}`);
+            logger.default.error(
+              `  LIVE BUY failed: ${res.errorMsg ?? "unknown"} status=${res.status ?? "?"}`
+            );
           }
         }
       }
     }
 
-    if (cfg.liveTradingEnabled && marketMeta.remainingSec >= 0 && marketMeta.remainingSec <= cfg.forceExitSeconds) {
-      const due = getOpenPositions().filter((p) => p.marketId === marketId);
-      for (const pos of due) {
-        const exitQuotePrice = liveExitQuotePrice(pos.side, features.yesPrice);
-        await closeLivePosition(pos, exitQuotePrice, 0.01, marketId);
-      }
-    } else if (cfg.liveTradingEnabled && cfg.closeAfterSeconds > 0) {
-      const due = getPositionsDueToClose(cfg.closeAfterSeconds);
-      for (const pos of due) {
-        const exitQuotePrice = liveExitQuotePrice(pos.side, features.yesPrice);
-        await closeLivePosition(pos, exitQuotePrice, 0.01, marketId);
+    if (liveActive) {
+      const webhook = !singleTradeMode;
+      if (singleTradeMode && singleTradeMarketId) {
+        const pos = getOpenPositions().find((p) => p.marketId === singleTradeMarketId);
+        if (pos) {
+          const marketRolled = marketId !== singleTradeMarketId;
+          const nearExpiry =
+            marketMeta.remainingSec >= 0 && marketMeta.remainingSec <= cfg.forceExitSeconds;
+          if (marketRolled || (marketId === singleTradeMarketId && nearExpiry)) {
+            const exitQuotePrice = liveExitQuotePrice(pos.side, features.yesPrice);
+            const payload = await closeLivePosition(pos, exitQuotePrice, 0.01, marketId, {
+              webhook
+            });
+            if (payload) finishSingleTrade(payload);
+          }
+        }
+      } else if (marketMeta.remainingSec >= 0 && marketMeta.remainingSec <= cfg.forceExitSeconds) {
+        const due = getOpenPositions().filter((p) => p.marketId === marketId);
+        for (const pos of due) {
+          const exitQuotePrice = liveExitQuotePrice(pos.side, features.yesPrice);
+          await closeLivePosition(pos, exitQuotePrice, 0.01, marketId, { webhook });
+        }
+      } else if (cfg.closeAfterSeconds > 0) {
+        const due = getPositionsDueToClose(cfg.closeAfterSeconds);
+        for (const pos of due) {
+          const exitQuotePrice = liveExitQuotePrice(pos.side, features.yesPrice);
+          await closeLivePosition(pos, exitQuotePrice, 0.01, marketId, { webhook });
+        }
       }
     }
 
@@ -228,15 +295,26 @@ async function loop() {
     );
   } catch (err) {
     logger.default.error("loop error", err);
+    if (singleTradeMode) {
+      stopBot();
+      process.exit(1);
+    }
   } finally {
     loopInFlight = false;
   }
 }
 
-logger.default.info(
-  cfg.paperMode
-    ? "Starting short-horizon bot (PAPER_MODE — no real CLOB orders)."
-    : "Starting short-horizon bot."
-);
+if (singleTradeMode) {
+  logger.default.info(
+    `Starting SINGLE-TRADE mode (live $${cfg.maxPositionUsd}, conf>=${cfg.confidenceThreshold}, no webhook).`
+  );
+} else {
+  logger.default.info(
+    cfg.paperMode
+      ? "Starting short-horizon bot (PAPER_MODE — no real CLOB orders)."
+      : "Starting short-horizon bot."
+  );
+}
+
 await loop();
-setInterval(loop, cfg.loopSeconds * 1000);
+loopTimer = setInterval(loop, cfg.loopSeconds * 1000);

@@ -149,6 +149,8 @@ Copy `.env.example` to `.env` and adjust as needed.
 
 **CLOB balance:** `npm run clob:balance` connects with `PRIVATE_KEY` (and proxy settings if needed) and prints your USDC balance on Polymarket CLOB.
 
+**Single live trade test:** `npm run dev:single-trade` waits for the first signal with `CONFIDENCE_THRESHOLD`, opens one live position (`MAX_POSITION_USD`), force-exits near expiry, prints the full trade JSON to stdout, and exits (no webhook).
+
 ---
 
 ## 📊 Compare UI in detail

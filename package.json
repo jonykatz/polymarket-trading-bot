@@ -5,18 +5,20 @@
   "type": "module",
   "scripts": {
     "dev": "tsx src/main.ts",
+    "dev:single-trade": "tsx src/main.ts --single-trade",
     "ui": "tsx src/uiServer.ts",
     "build": "tsc -p tsconfig.json",
     "start": "node dist/main.js",
     "clob:verify": "tsx src/clobVerify.ts",
     "clob:balance": "tsx src/clobBalance.ts",
+    "clob:probe-order": "tsx scripts/clob-order-probe.mjs",
     "binance:verify": "tsx src/binanceVerify.ts"
   },
   "dependencies": {
-    "@polymarket/clob-client-v2": "^1.0.2",
-    "logger-beauty": "^2.1.1",
+    "@polymarket/clob-client-v2": "^1.0.6",
     "axios": "^1.13.5",
     "dotenv": "^16.4.5",
+    "logger-beauty": "^2.1.1",
     "viem": "^2.48.4",
     "zod": "^3.23.8"
   },

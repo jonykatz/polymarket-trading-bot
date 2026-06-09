@@ -19,6 +19,7 @@ export const cfg = {
   maxPositionUsd: Number(process.env.MAX_POSITION_USD ?? 100),
   edgeThreshold: Number(process.env.EDGE_THRESHOLD ?? 0.03),
   confidenceThreshold: Number(process.env.CONFIDENCE_THRESHOLD ?? 0.8),
+  entrySlippage: Number(process.env.ENTRY_SLIPPAGE ?? 0.05),
   forceExitSeconds: Number(process.env.FORCE_EXIT_SECONDS ?? 3),
   emaFast: Number(process.env.EMA_FAST ?? 5),
   emaSlow: Number(process.env.EMA_SLOW ?? 13),

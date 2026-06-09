@@ -11,10 +11,16 @@ import {
 export type { ClosedTradePayload, ExecutionStatus, PredictionSignals } from "./tradeWebhook.js";
 
 export const ENTRY_PRICE_MIN = 0.35;
-export const ENTRY_PRICE_MAX = 0.9;
+export const ENTRY_PRICE_MAX = 0.95;
 
 export function isValidEntryPrice(price: number): boolean {
   return price >= ENTRY_PRICE_MIN && price <= ENTRY_PRICE_MAX;
+}
+
+/** Live buy limit: quote + ENTRY_SLIPPAGE, capped at ENTRY_PRICE_MAX. */
+export function liveEntryPriceLimit(quotePrice: number): number {
+  const bumped = quotePrice + cfg.entrySlippage;
+  return Math.round(Math.min(bumped, ENTRY_PRICE_MAX) * 100) / 100;
 }
 
 type PaperPosition = {
