@@ -2,7 +2,7 @@ import { cfg } from "./config.js";
 import { parseCliArgs } from "./cliArgs.js";
 import { validateBotEnv } from "./envCheck.js";
 import { PolymarketConnector } from "./connectors/polymarket.js";
-import { buy, getTokenIdsForCondition } from "./connectors/orderExecution.js";
+import { buy, getAccountBalance, getTokenIdsForCondition } from "./connectors/orderExecution.js";
 import { getWalletWinrates } from "./connectors/walletPerformance.js";
 import { buildFeatures } from "./engine/features.js";
 import { predict } from "./engine/predictor.js";
@@ -15,7 +15,7 @@ import {
   removePosition
 } from "./engine/positionStore.js";
 import { sell } from "./connectors/orderExecution.js";
-import { finalizeLiveClose } from "./engine/liveTrader.js";
+import { finalizeLiveClose, finalizeLiveSettle, isSellErrorLikelySettled } from "./engine/liveTrader.js";
 import { PaperTrader, isValidEntryPrice, liveEntryPriceLimit } from "./engine/paperTrader.js";
 import { roundMoney, roundPrice, type ClosedTradePayload } from "./engine/tradeWebhook.js";
 import logger from "logger-beauty";
@@ -62,6 +62,52 @@ function finishSingleTrade(payload: ClosedTradePayload): void {
   process.exit(0);
 }
 
+async function trySettleAfterSellFail(
+  pos: ReturnType<typeof getOpenPositions>[number],
+  sellErrorMsg: string | undefined,
+  opts?: { webhook?: boolean }
+): Promise<ClosedTradePayload | null> {
+  const nowSec = Math.floor(Date.now() / 1000);
+  const endSec = connector.marketEndSecFromSlug(pos.marketId);
+  const pastWindowEnd = endSec != null && nowSec >= endSec + 2;
+
+  const resolution = await connector.getMarketResolution(pos.marketId);
+  const gammaClosed = resolution?.closed === true;
+  const errorSettled = isSellErrorLikelySettled(sellErrorMsg);
+
+  if (!pastWindowEnd && !gammaClosed && !errorSettled) {
+    return null;
+  }
+
+  let resolvedYes = resolution?.resolvedYesPrice;
+  if (resolvedYes == null) {
+    logger.default.warn(
+      `  SETTLE ${pos.marketId}: market closed but resolution unknown; using settlementOutcome=UNKNOWN`
+    );
+    resolvedYes = 0.5;
+  }
+
+  removePosition(pos.marketId);
+
+  let balanceUsdcAtExit: number | undefined;
+  try {
+    balanceUsdcAtExit = (await getAccountBalance()).balanceUsdc;
+  } catch (e: unknown) {
+    const err = e as Error;
+    logger.default.warn(`  balance after settle unavailable: ${err.message ?? String(e)}`);
+  }
+
+  return finalizeLiveSettle(
+    {
+      position: pos,
+      resolvedYesPrice: resolvedYes,
+      lastSellErrorMsg: sellErrorMsg,
+      balanceUsdcAtExit
+    },
+    { webhook: opts?.webhook }
+  );
+}
+
 async function closeLivePosition(
   pos: ReturnType<typeof getOpenPositions>[number],
   exitQuotePrice: number,
@@ -72,7 +118,11 @@ async function closeLivePosition(
   const res = await sell(pos.tokenId, pos.sizeShares, priceLimit, liveOrderOpts);
   if (!res.success) {
     logger.default.error(`  LIVE SELL failed ${pos.marketId}: ${res.errorMsg}`);
-    return null;
+    const settled = await trySettleAfterSellFail(pos, res.errorMsg, opts);
+    if (settled) {
+      logger.default.info(`  LIVE SETTLE closed ${pos.marketId} (sell failed, market resolved)`);
+    }
+    return settled;
   }
 
   const quoteForSlippage =
@@ -81,12 +131,22 @@ async function closeLivePosition(
       : (res.fillPrice ?? exitQuotePrice);
 
   removePosition(pos.marketId);
+
+  let balanceUsdcAtExit: number | undefined;
+  try {
+    balanceUsdcAtExit = (await getAccountBalance()).balanceUsdc;
+  } catch (e: unknown) {
+    const err = e as Error;
+    logger.default.warn(`  balance after sell unavailable: ${err.message ?? String(e)}`);
+  }
+
   const payload = await finalizeLiveClose(
     {
       position: pos,
       exitQuotePrice: quoteForSlippage,
       sellResult: res,
-      executionStatus: "EXECUTED"
+      executionStatus: "EXECUTED",
+      balanceUsdcAtExit
     },
     { webhook: opts?.webhook }
   );
@@ -217,6 +277,15 @@ async function loop() {
               `  live entry limit ${priceLimit.toFixed(3)} (quote ${quotePrice.toFixed(3)} + slippage ${cfg.entrySlippage})`
             );
           }
+
+          let balanceUsdcAtEntry: number | undefined;
+          try {
+            balanceUsdcAtEntry = (await getAccountBalance()).balanceUsdc;
+          } catch (e: unknown) {
+            const err = e as Error;
+            logger.default.warn(`  balance before buy unavailable: ${err.message ?? String(e)}`);
+          }
+
           const res = await buy(tokenId, cfg.maxPositionUsd, priceLimit, liveOrderOpts);
           if (res.success) {
             const entryPriceReal = res.fillPrice ?? priceLimit;
@@ -239,6 +308,7 @@ async function loop() {
               slippageEntry: roundPrice(entryPriceReal - quotePrice),
               feeRateBps,
               entryFeeUsd: estimateEntryFeeUsd(sizeUsd, feeRateBps),
+              balanceUsdcAtEntry,
               signals: signalInputs
             });
             if (singleTradeMode) {

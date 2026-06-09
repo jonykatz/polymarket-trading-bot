@@ -96,6 +96,8 @@ export interface LivePosition {
   feeRateBps?: number;
   /** Entry-side fee already paid (USD). */
   entryFeeUsd?: number;
+  /** CLOB USDC balance snapshot immediately before the buy. */
+  balanceUsdcAtEntry?: number;
   /** Predictor signals at entry for close webhook. */
   signals?: PredictionSignals;
 }

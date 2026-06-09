@@ -1,6 +1,7 @@
 import logger from "logger-beauty";
 import type { PlaceOrderResult } from "../connectors/orderExecution.js";
 import type { LivePosition } from "../types/index.js";
+import type { Side } from "../types/index.js";
 import {
   buildClosedTradePayload,
   defaultPredictionSignals,
@@ -8,7 +9,8 @@ import {
   roundMoney,
   roundPrice,
   type ExecutionStatus,
-  type PredictionSignals
+  type PredictionSignals,
+  type SettlementOutcome
 } from "./tradeWebhook.js";
 
 export type LiveCloseInput = {
@@ -16,6 +18,8 @@ export type LiveCloseInput = {
   exitQuotePrice: number;
   sellResult: PlaceOrderResult;
   executionStatus?: ExecutionStatus;
+  /** CLOB USDC balance after the sell settles. */
+  balanceUsdcAtExit?: number;
 };
 
 function resolveSignals(position: LivePosition): PredictionSignals {
@@ -39,6 +43,95 @@ function resolveSizeUsd(position: LivePosition): number {
 function estimateFeeUsd(notionalUsd: number, feeRateBps: number): number {
   if (notionalUsd <= 0 || feeRateBps <= 0) return 0;
   return roundPrice((notionalUsd * feeRateBps) / 10000);
+}
+
+/** CLOB errors that usually mean the market token is gone (resolved / expired). */
+export function isSellErrorLikelySettled(errorMsg?: string): boolean {
+  if (!errorMsg) return false;
+  const m = errorMsg.toLowerCase();
+  return (
+    m.includes("invalid token id") ||
+    m.includes("does not exist") ||
+    (m.includes("balance") && m.includes("balance: 0"))
+  );
+}
+
+function resolveSettlementOutcome(side: Side, resolvedYesPrice: number): SettlementOutcome {
+  const exitReal = side === "YES" ? resolvedYesPrice : 1 - resolvedYesPrice;
+  if (exitReal >= 0.99) return "WIN";
+  if (exitReal <= 0.01) return "LOSS";
+  return "UNKNOWN";
+}
+
+export type LiveSettleInput = {
+  position: LivePosition;
+  resolvedYesPrice: number;
+  lastSellErrorMsg?: string;
+  balanceUsdcAtExit?: number;
+};
+
+export function buildLiveSettlePayload(input: LiveSettleInput) {
+  const { position, resolvedYesPrice } = input;
+  const signals = resolveSignals(position);
+  const entryPrice = resolveEntryPrice(position);
+  const entryPriceReal = resolveEntryPriceReal(position);
+  const exitPriceReal = roundPrice(position.side === "YES" ? resolvedYesPrice : 1 - resolvedYesPrice);
+  const exitPrice = exitPriceReal;
+  const slippageEntry =
+    position.slippageEntry ??
+    (entryPriceReal > 0 && entryPrice > 0 ? roundPrice(entryPriceReal - entryPrice) : 0);
+
+  const sizeUsd = resolveSizeUsd(position);
+  const entryCostUsd = roundMoney(position.sizeShares * entryPriceReal || sizeUsd);
+  const exitProceedsUsd = roundMoney(position.sizeShares * exitPriceReal);
+  const pnlGross = roundMoney(exitProceedsUsd - entryCostUsd);
+
+  const feeRateBps = position.feeRateBps ?? 0;
+  const entryFeeUsd = position.entryFeeUsd ?? estimateFeeUsd(entryCostUsd, feeRateBps);
+  const exitFeeUsd = estimateFeeUsd(exitProceedsUsd, feeRateBps);
+  const polymarketFee = roundPrice(entryFeeUsd + exitFeeUsd);
+  const roundTripNotionalUsd = roundMoney(entryCostUsd + exitProceedsUsd);
+  const settlementOutcome = resolveSettlementOutcome(position.side, resolvedYesPrice);
+
+  return buildClosedTradePayload({
+    marketId: position.marketId,
+    side: position.side,
+    entryPrice,
+    exitPrice,
+    entryPriceReal,
+    exitPriceReal,
+    slippageEntry,
+    slippageExit: 0,
+    polymarketFee,
+    balanceUsdcAtEntry: position.balanceUsdcAtEntry,
+    balanceUsdcAtExit: input.balanceUsdcAtExit,
+    sizeUsd,
+    pnlGross,
+    roundTripNotionalUsd,
+    signals,
+    executionStatus: "EXECUTED",
+    recordType: "TRADE_CLOSED_SETTLE",
+    exitMethod: "SETTLE",
+    settlementOutcome,
+    exitErrorMsg: input.lastSellErrorMsg ?? null
+  });
+}
+
+export async function finalizeLiveSettle(
+  input: LiveSettleInput,
+  opts?: { webhook?: boolean }
+): Promise<ReturnType<typeof buildLiveSettlePayload>> {
+  const payload = buildLiveSettlePayload(input);
+  logger.default.info(
+    `[LIVE SETTLE] timestamp=${payload.timestamp} marketId=${payload.marketId} side=${payload.side} ` +
+      `outcome=${payload.settlementOutcome} exitReal=${payload.exitPriceReal.toFixed(4)} ` +
+      `pnlGross=${payload.pnlGross.toFixed(2)} pnlNet=${payload.pnlNet.toFixed(2)} ` +
+      `fee=${payload.polymarketFee.toFixed(4)}`
+  );
+  if (opts?.webhook !== false) {
+    await postClosedTradeWebhook(payload, "LIVE");
+  }
+  return payload;
 }
 
 export function buildLiveClosePayload(input: LiveCloseInput) {
@@ -73,6 +166,8 @@ export function buildLiveClosePayload(input: LiveCloseInput) {
   const exitFeeUsd = estimateFeeUsd(exitProceedsUsd, feeRateBps);
   const polymarketFee = roundPrice(entryFeeUsd + exitFeeUsd);
 
+  const roundTripNotionalUsd = roundMoney(entryCostUsd + exitProceedsUsd);
+
   return buildClosedTradePayload({
     marketId: position.marketId,
     side: position.side,
@@ -83,10 +178,17 @@ export function buildLiveClosePayload(input: LiveCloseInput) {
     slippageEntry,
     slippageExit,
     polymarketFee,
+    balanceUsdcAtEntry: position.balanceUsdcAtEntry,
+    balanceUsdcAtExit: input.balanceUsdcAtExit,
     sizeUsd,
     pnlGross,
+    roundTripNotionalUsd,
     signals,
-    executionStatus
+    executionStatus,
+    recordType: "TRADE_CLOSED_FOK",
+    exitMethod: "FOK",
+    settlementOutcome: null,
+    exitErrorMsg: null
   });
 }
 

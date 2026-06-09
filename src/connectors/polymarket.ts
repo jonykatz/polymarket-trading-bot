@@ -115,6 +115,52 @@ export class PolymarketConnector {
     return this.selectedMarket?.condition_id ?? this.selectedMarket?.conditionId ?? null;
   }
 
+  /** Fetch a market by slug (works for closed / resolved 5m windows). */
+  async getMarketResolution(slug: string): Promise<{
+    closed: boolean;
+    resolvedYesPrice: number | null;
+  } | null> {
+    try {
+      const arr = await this.fetchJson<GammaMarket[]>(
+        `${this.baseUrl}/markets?slug=${encodeURIComponent(slug)}`
+      );
+      if (!arr.length) return null;
+      const m = arr[0];
+      const closed = Boolean(m.closed);
+      if (!closed) return { closed: false, resolvedYesPrice: null };
+
+      const outcomes = parseJsonArray(m.outcomes);
+      const prices = parseJsonArray(m.outcomePrices).map(Number);
+      if (outcomes.length >= 2 && outcomes.length === prices.length) {
+        const yesIdx = outcomes.findIndex(
+          (o) => `${o}`.toLowerCase() === "up" || `${o}`.toLowerCase() === "yes"
+        );
+        if (yesIdx >= 0 && Number.isFinite(prices[yesIdx])) {
+          const yesP = prices[yesIdx];
+          if (yesP >= 0.99) return { closed: true, resolvedYesPrice: 1 };
+          if (yesP <= 0.01) return { closed: true, resolvedYesPrice: 0 };
+          return { closed: true, resolvedYesPrice: yesP >= 0.5 ? 1 : 0 };
+        }
+      }
+
+      const last = Number(m.lastTradePrice ?? NaN);
+      if (Number.isFinite(last)) {
+        if (last >= 0.99) return { closed: true, resolvedYesPrice: 1 };
+        if (last <= 0.01) return { closed: true, resolvedYesPrice: 0 };
+      }
+
+      return { closed: true, resolvedYesPrice: null };
+    } catch {
+      return null;
+    }
+  }
+
+  /** Unix seconds when a btc-updown-5m slug window ends (start + 300), or null. */
+  marketEndSecFromSlug(slug: string): number | null {
+    const start = parse5mStartFromSlug(slug);
+    return start != null ? start + 300 : null;
+  }
+
   async getCurrentMarketInfo(): Promise<{ slug: string; endDate?: string; remainingSec: number; question?: string }> {
     const m = await this.resolveMarket();
     const slug = m.slug || m.id;

@@ -4,6 +4,12 @@ import { Side } from "../types/index.js";
 
 export type ExecutionStatus = "TESTING" | "EXECUTED" | "BLOCKED_STOP";
 
+export type TradeRecordType = "PAPER_CLOSE" | "TRADE_CLOSED_FOK" | "TRADE_CLOSED_SETTLE";
+
+export type ExitMethod = "FOK" | "SETTLE";
+
+export type SettlementOutcome = "WIN" | "LOSS" | "UNKNOWN";
+
 export type PredictionSignals = {
   confidenceScore: number;
   confidenceThreshold: number;
@@ -23,6 +29,10 @@ export type ClosedTradePayload = {
   hour: number;
   session: "asia" | "europe" | "us" | "off";
   dayOfWeek: "Monday" | "Tuesday" | "Wednesday" | "Thursday" | "Friday" | "Saturday" | "Sunday";
+  recordType: TradeRecordType;
+  exitMethod: ExitMethod | null;
+  settlementOutcome: SettlementOutcome | null;
+  exitErrorMsg: string | null;
   marketId: string;
   side: Side;
   entryPrice: number;
@@ -32,6 +42,12 @@ export type ClosedTradePayload = {
   slippageEntry: number;
   slippageExit: number;
   polymarketFee: number;
+  /** Fee as % of round-trip notional (entry + exit). */
+  polymarketFeePct: number;
+  /** CLOB USDC balance before opening the position; null in paper or if unavailable. */
+  balanceUsdcAtEntry: number | null;
+  /** CLOB USDC balance after closing the position; null in paper or if unavailable. */
+  balanceUsdcAtExit: number | null;
   sizeUsd: number;
   pnlUsd: number;
   pnlGross: number;
@@ -92,6 +108,11 @@ export function getDayOfWeekUtc(date: Date): ClosedTradePayload["dayOfWeek"] {
   return weekdays[date.getUTCDay()];
 }
 
+export function computePolymarketFeePct(feeUsd: number, roundTripNotionalUsd: number): number {
+  if (feeUsd <= 0 || roundTripNotionalUsd <= 0) return 0;
+  return roundPrice((feeUsd / roundTripNotionalUsd) * 100);
+}
+
 export function buildClosedTradePayload(input: {
   marketId: string;
   side: Side;
@@ -102,33 +123,64 @@ export function buildClosedTradePayload(input: {
   slippageEntry: number;
   slippageExit: number;
   polymarketFee: number;
+  polymarketFeePct?: number;
+  balanceUsdcAtEntry?: number;
+  balanceUsdcAtExit?: number;
   sizeUsd: number;
   pnlGross: number;
+  pnlNet?: number;
+  roundTripNotionalUsd?: number;
   signals: PredictionSignals;
   executionStatus: ExecutionStatus;
+  recordType?: TradeRecordType;
+  exitMethod?: ExitMethod | null;
+  settlementOutcome?: SettlementOutcome | null;
+  exitErrorMsg?: string | null;
   timestamp?: string;
 }): ClosedTradePayload {
   const timestamp = input.timestamp ?? new Date().toISOString();
   const dateObj = new Date(timestamp);
   const utcHour = dateObj.getUTCHours();
   const pnlGross = roundMoney(input.pnlGross);
-  const pnlNet = roundMoney(pnlGross - input.polymarketFee);
+  const balanceAtEntry = input.balanceUsdcAtEntry;
+  const balanceAtExit = input.balanceUsdcAtExit;
+  const pnlNetFromBalance =
+    balanceAtEntry != null && balanceAtExit != null
+      ? roundMoney(balanceAtExit - balanceAtEntry)
+      : undefined;
+  const feeFromBalance =
+    pnlNetFromBalance != null ? roundPrice(Math.max(0, pnlGross - pnlNetFromBalance)) : undefined;
+  const polymarketFee = feeFromBalance ?? roundPrice(input.polymarketFee);
+  const pnlNet = pnlNetFromBalance ?? input.pnlNet ?? roundMoney(pnlGross - polymarketFee);
+  const roundTripNotional =
+    input.roundTripNotionalUsd ??
+    (input.sizeUsd > 0 ? input.sizeUsd * 2 : 0);
+  const polymarketFeePct =
+    input.polymarketFeePct ?? computePolymarketFeePct(polymarketFee, roundTripNotional);
 
-  return {
+  const payload: ClosedTradePayload = {
     timestamp,
     date: timestamp.slice(0, 10),
     hour: utcHour,
     session: getSessionByUtcHour(utcHour),
     dayOfWeek: getDayOfWeekUtc(dateObj),
+    recordType: input.recordType ?? "TRADE_CLOSED_FOK",
+    exitMethod: input.exitMethod ?? "FOK",
+    settlementOutcome: input.settlementOutcome ?? null,
+    exitErrorMsg: input.exitErrorMsg ?? null,
     marketId: input.marketId,
     side: input.side,
-    entryPrice: input.entryPrice,
-    exitPrice: input.exitPrice,
-    entryPriceReal: input.entryPriceReal,
-    exitPriceReal: input.exitPriceReal,
+    entryPrice: roundPrice(input.entryPrice),
+    exitPrice: roundPrice(input.exitPrice),
+    entryPriceReal: roundPrice(input.entryPriceReal),
+    exitPriceReal: roundPrice(input.exitPriceReal),
     slippageEntry: roundPrice(input.slippageEntry),
     slippageExit: roundPrice(input.slippageExit),
-    polymarketFee: roundPrice(input.polymarketFee),
+    polymarketFee,
+    polymarketFeePct,
+    balanceUsdcAtEntry:
+      balanceAtEntry != null ? roundMoney(balanceAtEntry) : null,
+    balanceUsdcAtExit: balanceAtExit != null ? roundMoney(balanceAtExit) : null,
     sizeUsd: input.sizeUsd,
     pnlUsd: pnlGross,
     pnlGross,
@@ -145,6 +197,8 @@ export function buildClosedTradePayload(input: {
     btcSnapshotStale: input.signals.btcSnapshotStale,
     executionStatus: input.executionStatus
   };
+
+  return payload;
 }
 
 export async function postClosedTradeWebhook(

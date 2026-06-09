@@ -6,53 +6,72 @@ Ideas y trabajo pendiente. Orden sugerido de implementación.
 
 ## En progreso / próximo
 
-_Nada en curso._
+**Paquete ejecución live (jun 2026)** — prioridad tras logs `dev:single-trade` (FAK kill en YES ~0.56, reintentos en bucle).
+
+1. **Stop retry BUY + log honesto**
+   - [ ] Máx 1–3 intentos de buy por `marketId`; si falla → no reintentar hasta el próximo mercado 5m.
+   - [ ] Si `LIVE BUY failed`, no loguear `OPEN YES/NO` como si hubiera entrado.
+   - [ ] `single-trade`: si no hay fill tras N intentos → JSON `{ "recordType": "NO_TRADE", ... }` y exit.
+
+2. **Salida más robusta**
+   - [ ] `EXIT_SLIPPAGE` en `.env` — SELL limit = `quote - exitSlippage` (floor 0.01), no fijo `0.01`.
+   - [ ] Subir ventana de cierre: probar `FORCE_EXIT_SECONDS=30–60` (hoy 3 s es muy justo).
+   - [ ] Evaluar **FAK en sell** o reintentos escalonados si FOK falla antes del settlement.
+
+3. **Gate de tiempo entrada live**
+   - [ ] No abrir live si `remainingSec` < umbral (ej. 60 s) — evita FAK contra book vacío.
+   - [ ] Opcional: slippage dinámico en precios extremos (`max(ENTRY_SLIPPAGE, quote * 0.05)`).
+
+4. **JSON n8n / Sheets**
+   - [x] `recordType`, `exitMethod`, `settlementOutcome`, `exitErrorMsg` en cierres live.
+   - [ ] Campos desglosados: `entryNotionalUsd`, `entryFeeUsd`, `entryCashOutUsd`.
+   - [x] `balanceUsdcAtEntry`, `balanceUsdcAtExit`, `polymarketFeePct` (null si no hay snapshot).
+   - [x] Precios redondeados en payload.
 
 ---
 
-## Pendiente — Ejecución CLOB (FOK → FAK + slippage)
+## Pendiente — Ejecución CLOB (resto)
 
-**Contexto (jun 2026, `dev:single-trade`)**
+**Contexto actual**
 
-- Auth CLOB y `POLY_1271` OK tras upgrade `@polymarket/clob-client-v2@1.0.6`.
-- Entrada live falló cerca del cierre (~22 s): `order couldn't be fully filled. FOK orders are fully filled or killed. status=400`.
-- Hoy `buy()` / `sell()` usan **FOK** fijo; `priceLimit` = precio exacto del tick (sin margen).
+- `buy()` → **FAK**; `sell()` → **FOK** fijo (`src/connectors/orderExecution.ts`).
+- `ENTRY_SLIPPAGE` + cap `ENTRY_PRICE_MAX=0.95` en live (`src/engine/paperTrader.ts`, `src/main.ts`).
+- Trades NO ~0.50 entran bien con $1; YES ~0.90+ falla a menudo: `no orders found to match with FAK order`.
+- Con `MAX_POSITION_USD=100` el riesgo de FAK parcial + FOK sell fail sube ~×100 — no escalar hasta validar fills.
 
-### Objetivo
+### Tipo de orden configurable
 
-Entrar y salir con más éxito en mercados BTC 5m (liquidez fina al final de la ventana), sin sorpresas de sizing.
+- [ ] Env `CLOB_BUY_ORDER_TYPE` / `CLOB_SELL_ORDER_TYPE` = `FOK|FAK` (defaults actuales).
+- [ ] Posición FAK parcial: `sizeUsd` / shares en JSON = fill real, no `MAX_POSITION_USD` planeado.
 
-### 1. Tipo de orden configurable
+### Probe CLOB sin órdenes reales
 
-- [ ] Env `CLOB_ORDER_TYPE=FOK|FAK` (default `FOK` para no cambiar comportamiento actual).
-- [ ] **FAK**: fill parcial OK (ej. querés $1, entra $0.89 si no hay más liquidez).
-- [ ] Ajustar `LivePosition` / close logic para posiciones con `sizeUsd` / shares menores al planeado.
+- [ ] `scripts/clob-order-probe.mjs` / `npm run clob:probe-order` → solo lectura (balance + auth + tick size) o confirmación explícita antes de orden (~$1 real hoy).
 
-### 2. Slippage configurable en entrada/salida
+### Sizing gradual
 
-- [ ] Env `ENTRY_SLIPPAGE` / `EXIT_SLIPPAGE` (ej. `0.02` = 2 centavos sobre el quote del tick).
-- [ ] BUY: `priceLimit = quote + entrySlippage` (cap 0.99).
-- [ ] SELL: `priceLimit = quote - exitSlippage` (floor 0.01).
-
-### 3. Gate de tiempo (opcional, mismo epic)
-
-- [ ] No abrir live si `remainingSec` < umbral (ej. 60 s) — evitar FOK/FAK contra book vacío al settlement.
-
-### 4. Probe CLOB sin órdenes reales
-
-- [ ] Cambiar `scripts/clob-order-probe.mjs` / `npm run clob:probe-order` a **solo lectura** (balance + auth + tick size), o confirmación explícita antes de postear orden.
+- [ ] Checklist antes de subir size: BUY fill ≥95%, SELL cierra, JSON cuadra con Polymarket.
+- [ ] Ruta sugerida: $1 → $5 → $25 → $100.
 
 ### Criterios de aceptación
 
-- `dev:single-trade` completa al menos un ciclo buy→sell en BTC 5m sin FOK kill por liquidez en condiciones normales.
-- FAK documentado: posición puede ser < `MAX_POSITION_USD`; webhook/JSON reflejan fill real.
+- `dev:single-trade` buy→sell en BTC 5m sin bucle de FAK failed.
+- Sin entradas live en últimos 60 s del mercado (configurable).
 - Probe nunca gasta USDC sin opt-in.
 
-### Archivos tocados (estimado)
+### Archivos (estimado)
 
-- `src/connectors/orderExecution.ts`, `src/config.ts`, `src/main.ts`, `.env.example`
-- `scripts/clob-order-probe.mjs`
-- `CHANGELOG.md` al mergear
+- `src/connectors/orderExecution.ts`, `src/config.ts`, `src/main.ts`, `src/engine/liveTrader.ts`, `src/engine/tradeWebhook.ts`, `.env.example`
+
+---
+
+## Pendiente — Señal (whale + RSI)
+
+**Contexto:** `whaleSignal=0` casi siempre en BTC 5m; umbrales altos + pocas wallets + winrate default 0.5.
+
+- [ ] Log diagnóstico por tick: notional whale, wallets que pasan filtro, umbral vs actual.
+- [ ] Umbrales más bajos solo 5m, o peso whale=0 hasta tunear (`src/engine/predictor.ts`, `polymarket.ts`).
+- [ ] Revisar `rsi=0.0` en logs — buffer corto o piso neutro (50) si distorsiona confianza.
 
 ---
 
@@ -60,59 +79,35 @@ Entrar y salir con más éxito en mercados BTC 5m (liquidez fina al final de la 
 
 **Contexto (logs Railway, mayo 2026)**
 
-- El bot llama `GET /fapi/v1/klines` en **cada loop** (~15 s) vía `getBtcMarketSnapshot()` → `loadBtcFeatures()` en `src/engine/features.ts`.
-- Errores intermitentes: `429` / `-1003`, límite **2400 req/min por IP** (`34.87.100.13`, IP compartida GCP/Railway).
-- Cuando falla: `btcScore = 0`, confianza baja; el loop de Polymarket sigue.
-- Las velas son **1m**; refrescar REST cada 15 s es redundante (cambio útil ~cada 60 s).
+- REST `/fapi/v1/klines` cada loop (~15 s) → 429 en IP compartida.
+- Caché 60 s + stale fallback **implementado** en `src/connectors/binance.ts` (ver CHANGELOG).
 
-### 1. Caché REST (rápido, alto impacto)
+### Resto
 
-- [ ] En `src/connectors/binance.ts`: guardar último `BtcMarketSnapshot` + timestamp.
-- [ ] TTL por defecto **55–60 s** (config: `BINANCE_SNAPSHOT_TTL_SEC`).
-- [ ] `getBtcMarketSnapshot()`: devolver caché si fresco; si no, un solo REST.
-- [ ] En **429**: devolver caché **stale** si existe (no caer a `btcScore = 0` de golpe).
-- [ ] Documentar en `.env.example` y README (solo vars nuevas).
-
-### 2. WebSocket Futures (recomendado por Binance)
-
-- [ ] Módulo singleton, ej. `src/connectors/binanceStream.ts`.
-- [ ] Conectar: `wss://fstream.binance.com/ws/btcusdt@kline_1m` (alineado con `BINANCE_REST_BASE` / fapi).
-- [ ] Mantener ring buffer de ~6 closes; actualizar al cerrar vela (`k.x === true`).
-- [ ] `getBtcMarketSnapshot()`: leer primero del stream; REST solo fallback.
-- [ ] Reconnect con backoff; flag config `BINANCE_USE_WEBSOCKET=true`.
-
-### 3. Backoff ante rate limit
-
-- [ ] Tras 429: no hacer REST durante **60–120 s** (`BINANCE_REST_COOLDOWN_SEC`).
-- [ ] Log claro: `using stale BTC snapshot` vs `BTC unavailable`.
-
-### 4. Ops / Railway (sin código o mínimo)
-
-- [ ] Confirmar **una sola réplica** del bot en producción.
-- [ ] Revisar si otro servicio en el mismo proyecto usa Binance en la misma IP.
-- [ ] Mitigación temporal: `BINANCE_SNAPSHOT_TTL_SEC=60` o `BINANCE_FEATURES_ENABLED=false`.
-
-### Criterios de aceptación
-
-- En producción: sin ráfagas de `BTC features unavailable` cada pocos minutos.
-- Como mucho **~1 request REST/min** por réplica (con caché), o **0** con WS estable.
-- Tras 429: señal BTC sigue con snapshot stale hasta que REST/WS recupere.
-
-### Archivos tocados (estimado)
-
-- `src/connectors/binance.ts`
-- `src/connectors/binanceStream.ts` (nuevo)
-- `src/config.ts`, `.env.example`
-- Opcional: `CHANGELOG.md` al mergear
+- [ ] WebSocket `btcusdt@kline_1m` + reconnect backoff (`BINANCE_USE_WEBSOCKET`).
+- [ ] Cooldown REST tras 429 (`BINANCE_REST_COOLDOWN_SEC`).
+- [ ] Ops: una sola réplica Railway; revisar otros servicios en misma IP.
 
 ---
 
 ## Backlog (otras ideas)
 
-_Añadir aquí cuando surjan._
+- [ ] Liquidez pre-trade: leer depth del book y cap `MAX_POSITION_USD` al size fillable.
+- [ ] `single-trade` timeout global (ej. 15 min sin trade → exit).
+- [ ] Comparativa paper vs live PnL antes de prod 24/7.
+- [ ] Env sugerido documentado: `CONFIDENCE_THRESHOLD=0.82–0.85`, `MAX_POSITION_USD=1–5` en fase test.
 
 ---
 
 ## Hecho
 
-_Vaciar ítems aquí al completarlos._
+- [x] `@polymarket/clob-client-v2@1.0.6` — órdenes `POLY_1271` (signer=funder).
+- [x] `buy()` FAK, `sell()` FOK; CLOB 400/error → `success: false`.
+- [x] `ENTRY_SLIPPAGE`, `ENTRY_PRICE_MAX=0.95`, `liveEntryPriceLimit()`.
+- [x] `--single-trade` / `npm run dev:single-trade` + `forceLive`.
+- [x] Posiciones live en `.data/open-positions.json` + migración legacy.
+- [x] `npm run clob:balance`, `getAccountBalance()`.
+- [x] Webhook + JSON cierre: slippage, fees, señales, `executionStatus`.
+- [x] Binance snapshot cache + stale fallback (`BINANCE_SNAPSHOT_TTL_SEC`).
+- [x] JSON: `balanceUsdcAtEntry`, `balanceUsdcAtExit`, `polymarketFeePct` (null si no hay snapshot).
+- [x] `TRADE_CLOSED_SETTLE` JSON cuando SELL falla y el mercado ya resolvió (`getMarketResolution`, `recordType`, `settlementOutcome`).

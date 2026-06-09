@@ -169,6 +169,10 @@ export class PaperTrader {
         pnlGross: pnlUsd,
         signals: pos.signals,
         executionStatus: "TESTING",
+        recordType: "PAPER_CLOSE",
+        exitMethod: null,
+        settlementOutcome: null,
+        exitErrorMsg: null,
         timestamp
       }),
       "PAPER"
