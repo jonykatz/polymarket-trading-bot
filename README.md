@@ -85,6 +85,7 @@ npm run pm2:start    # build + start in background
 npm run pm2:logs     # tail logs
 npm run pm2:stop     # stop
 npm run pm2:restart  # rebuild + restart after code changes
+npm run pm2:deploy   # rebuild + restart + tail logs (one command)
 ```
 
 Logs also go to `logs/pm2-out.log` and `logs/pm2-error.log`. Optional: `npx pm2 startup` then follow its `sudo` hint so pm2 survives reboot.
