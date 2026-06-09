@@ -4,11 +4,15 @@ import { Side } from "../types/index.js";
 
 export type ExecutionStatus = "TESTING" | "EXECUTED" | "BLOCKED_STOP";
 
-export type TradeRecordType = "PAPER_CLOSE" | "TRADE_CLOSED_FOK" | "TRADE_CLOSED_SETTLE";
+export type TradeRecordType =
+  | "PAPER_CLOSE"
+  | "TRADE_CLOSED_FOK"
+  | "TRADE_CLOSED_FAK"
+  | "TRADE_CLOSED_SETTLE";
 
-export type ExitMethod = "FOK" | "SETTLE";
+export type ExitMethod = "FOK" | "FAK" | "SETTLE";
 
-export type SettlementOutcome = "WIN" | "LOSS" | "UNKNOWN";
+export type SettlementOutcome = "WIN" | "LOSS" | "UNKNOWN" | "PENDING_SETTLEMENT";
 
 export type PredictionSignals = {
   confidenceScore: number;
@@ -148,10 +152,19 @@ export function buildClosedTradePayload(input: {
     balanceAtEntry != null && balanceAtExit != null
       ? roundMoney(balanceAtExit - balanceAtEntry)
       : undefined;
+  const estimatedFeeUsd = roundPrice(input.polymarketFee);
+  const balanceDeltaPlausible =
+    pnlNetFromBalance != null &&
+    Math.abs(pnlNetFromBalance - pnlGross) <= Math.max(0.15, Math.abs(pnlGross) * 0.35);
   const feeFromBalance =
-    pnlNetFromBalance != null ? roundPrice(Math.max(0, pnlGross - pnlNetFromBalance)) : undefined;
-  const polymarketFee = feeFromBalance ?? roundPrice(input.polymarketFee);
-  const pnlNet = pnlNetFromBalance ?? input.pnlNet ?? roundMoney(pnlGross - polymarketFee);
+    balanceDeltaPlausible && pnlNetFromBalance != null
+      ? roundPrice(Math.max(0, pnlGross - pnlNetFromBalance))
+      : undefined;
+  const polymarketFee = feeFromBalance ?? estimatedFeeUsd;
+  const pnlNet =
+    balanceDeltaPlausible && pnlNetFromBalance != null
+      ? pnlNetFromBalance
+      : input.pnlNet ?? roundMoney(pnlGross - polymarketFee);
   const roundTripNotional =
     input.roundTripNotionalUsd ??
     (input.sizeUsd > 0 ? input.sizeUsd * 2 : 0);
@@ -164,8 +177,8 @@ export function buildClosedTradePayload(input: {
     hour: utcHour,
     session: getSessionByUtcHour(utcHour),
     dayOfWeek: getDayOfWeekUtc(dateObj),
-    recordType: input.recordType ?? "TRADE_CLOSED_FOK",
-    exitMethod: input.exitMethod ?? "FOK",
+    recordType: input.recordType ?? "TRADE_CLOSED_FAK",
+    exitMethod: input.exitMethod ?? "FAK",
     settlementOutcome: input.settlementOutcome ?? null,
     exitErrorMsg: input.exitErrorMsg ?? null,
     marketId: input.marketId,

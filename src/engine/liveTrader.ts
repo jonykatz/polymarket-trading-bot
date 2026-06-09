@@ -62,7 +62,11 @@ export function isSellErrorLikelySettled(errorMsg?: string): boolean {
   );
 }
 
-function resolveSettlementOutcome(side: Side, resolvedYesPrice: number): SettlementOutcome {
+function resolveSettlementOutcome(
+  side: Side,
+  resolvedYesPrice: number | null
+): SettlementOutcome {
+  if (resolvedYesPrice == null) return "PENDING_SETTLEMENT";
   const exitReal = side === "YES" ? resolvedYesPrice : 1 - resolvedYesPrice;
   if (exitReal >= 0.99) return "WIN";
   if (exitReal <= 0.01) return "LOSS";
@@ -71,10 +75,11 @@ function resolveSettlementOutcome(side: Side, resolvedYesPrice: number): Settlem
 
 export type LiveSettleInput = {
   position: LivePosition;
-  resolvedYesPrice: number;
+  resolvedYesPrice: number | null;
   lastSellErrorMsg?: string;
   balanceUsdcAtExit?: number;
   eventContext: TradeEventContext;
+  /** Omitted for proactive settlement (no sell attempted). */
   sellPriceLimit?: number;
 };
 
@@ -83,7 +88,11 @@ export function buildLiveSettlePayload(input: LiveSettleInput) {
   const signals = resolveSignals(position);
   const entryPrice = resolveEntryPrice(position);
   const entryPriceReal = resolveEntryPriceReal(position);
-  const exitPriceReal = roundPrice(position.side === "YES" ? resolvedYesPrice : 1 - resolvedYesPrice);
+  const pendingSettlement = resolvedYesPrice == null;
+  const exitPriceReal =
+    resolvedYesPrice != null
+      ? roundPrice(position.side === "YES" ? resolvedYesPrice : 1 - resolvedYesPrice)
+      : entryPrice;
   const exitPrice = exitPriceReal;
   const slippageEntry =
     position.slippageEntry ??
@@ -91,14 +100,18 @@ export function buildLiveSettlePayload(input: LiveSettleInput) {
 
   const sizeUsd = resolveSizeUsd(position);
   const entryCostUsd = roundMoney(position.sizeShares * entryPriceReal || sizeUsd);
-  const exitProceedsUsd = roundMoney(position.sizeShares * exitPriceReal);
-  const pnlGross = roundMoney(exitProceedsUsd - entryCostUsd);
+  const exitProceedsUsd = pendingSettlement
+    ? 0
+    : roundMoney(position.sizeShares * exitPriceReal);
+  const pnlGross = pendingSettlement ? 0 : roundMoney(exitProceedsUsd - entryCostUsd);
 
   const feeRateBps = position.feeRateBps ?? 0;
   const entryFeeUsd = position.entryFeeUsd ?? estimateFeeUsd(entryCostUsd, feeRateBps);
-  const exitFeeUsd = estimateFeeUsd(exitProceedsUsd, feeRateBps);
+  const exitFeeUsd = pendingSettlement ? 0 : estimateFeeUsd(exitProceedsUsd, feeRateBps);
   const polymarketFee = roundPrice(entryFeeUsd + exitFeeUsd);
-  const roundTripNotionalUsd = roundMoney(entryCostUsd + exitProceedsUsd);
+  const roundTripNotionalUsd = pendingSettlement
+    ? roundMoney(entryCostUsd)
+    : roundMoney(entryCostUsd + exitProceedsUsd);
   const settlementOutcome = resolveSettlementOutcome(position.side, resolvedYesPrice);
 
   return buildClosedTradePayload({
@@ -107,7 +120,7 @@ export function buildLiveSettlePayload(input: LiveSettleInput) {
     entryPrice,
     exitPrice,
     entryPriceReal,
-    exitPriceReal,
+    exitPriceReal: pendingSettlement ? entryPriceReal : exitPriceReal,
     slippageEntry,
     slippageExit: 0,
     polymarketFee,
@@ -121,7 +134,7 @@ export function buildLiveSettlePayload(input: LiveSettleInput) {
     recordType: "TRADE_CLOSED_SETTLE",
     exitMethod: "SETTLE",
     settlementOutcome,
-    exitErrorMsg: input.lastSellErrorMsg ?? null
+    exitErrorMsg: null
   });
 }
 
@@ -138,8 +151,7 @@ export async function finalizeLiveSettle(
   );
   if (opts?.webhook !== false) {
     const sheets = buildSheetsEventFromClose(payload, input.eventContext, input.position, {
-      priceLimit: input.sellPriceLimit,
-      errorMsg: input.lastSellErrorMsg
+      priceLimit: input.sellPriceLimit
     });
     await postTradeEventWebhook(sheets, "LIVE");
   }
@@ -197,8 +209,8 @@ export function buildLiveClosePayload(input: LiveCloseInput) {
     roundTripNotionalUsd,
     signals,
     executionStatus,
-    recordType: "TRADE_CLOSED_FOK",
-    exitMethod: "FOK",
+    recordType: "TRADE_CLOSED_FAK",
+    exitMethod: "FAK",
     settlementOutcome: null,
     exitErrorMsg: null
   });

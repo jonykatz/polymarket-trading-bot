@@ -553,7 +553,7 @@ export async function sell(
     side: "SELL",
     size: sizeShares,
     price: priceLimit,
-    orderType: "FOK",
+    orderType: "FAK",
     forceLive: opts?.forceLive
   });
 }

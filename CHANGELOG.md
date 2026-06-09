@@ -6,6 +6,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+- Fixed: Live exits use FAK sells, proactive Gamma settlement before SELL, plausible-balance fee math in `tradeWebhook.ts`, and settlement webhooks with `exitStatus=SETTLED` (`orderExecution.ts`, `main.ts`, `liveTrader.ts`, `sheetsEvent.ts`).
+- Fixed: `src/main.ts` live mode closes or settles positions when the 5m market rolls (stale `open-positions.json` entries) and widens force-exit to `FORCE_EXIT_SECONDS + LOOP_SECONDS` so 15s ticks still emit `TRADE_CLOSED_*` webhooks before expiry.
+- Added: `ecosystem.config.cjs` and `npm run pm2:start|stop|logs|restart` for live 24/7 on a local Mac without keeping Terminal open (`pm2` devDependency).
 - Changed: Live and `single-trade` POST flat Sheets payloads to `WEBHOOK_URL` (n8n) instead of stdout JSON; emits `SIGNAL_SKIP`, `ENTRY_FAK_FAILED`, `TRADE_CLOSED_FOK`, and `TRADE_CLOSED_SETTLE` (`src/engine/sheetsEvent.ts`, `src/main.ts`, `src/engine/liveTrader.ts`).
 - Added: `TRADE_CLOSED_SETTLE` JSON when live SELL fails after market resolution — `recordType`, `exitMethod`, `settlementOutcome`, `exitErrorMsg` on close payloads; Gamma resolution via `PolymarketConnector.getMarketResolution()` (`src/main.ts`, `src/engine/liveTrader.ts`, `src/connectors/polymarket.ts`).
 - Changed: Live close JSON always emits `balanceUsdcAtEntry`, `balanceUsdcAtExit`, and `polymarketFeePct` (null when unavailable) with rounded prices for n8n/Sheets; fee USD reconciled from wallet balance delta when snapshots exist (`src/engine/tradeWebhook.ts`, `src/main.ts`, `src/engine/liveTrader.ts`).

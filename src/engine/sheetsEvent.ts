@@ -73,8 +73,8 @@ export type SheetsTradeEventPayload = {
   entryErrorMsg: string | null;
   entryAttemptCount: number;
   balanceUsdcAtEntry: number | null;
-  exitMethod: "FOK" | "SETTLE" | null;
-  exitOrderType: "FOK" | "FAK" | null;
+  exitMethod: "FOK" | "FAK" | "SETTLE" | null;
+  exitOrderType: "FOK" | "FAK" | "SETTLE" | null;
   exitPriceQuote: number | null;
   exitPriceLimit: number | null;
   exitPriceReal: number | null;
@@ -211,14 +211,28 @@ export function buildSheetsEventFromClose(
     entryAttemptCount: position.entryAttemptCount ?? 1,
     balanceUsdcAtEntry: closed.balanceUsdcAtEntry,
     exitMethod: closed.exitMethod,
-    exitOrderType: closed.exitMethod === "FOK" ? "FOK" : null,
+    exitOrderType:
+      closed.exitMethod === "SETTLE"
+        ? "SETTLE"
+        : closed.exitMethod === "FAK"
+          ? "FAK"
+          : closed.exitMethod === "FOK"
+            ? "FOK"
+            : null,
     exitPriceQuote: roundPrice(closed.exitPrice),
-    exitPriceLimit: sellExtras?.priceLimit ?? null,
+    exitPriceLimit:
+      closed.exitMethod === "SETTLE" ? null : (sellExtras?.priceLimit ?? null),
     exitPriceReal: closed.exitPriceReal,
     slippageExit: closed.slippageExit,
     exitOrderId: sellExtras?.orderId ?? null,
-    exitStatus: sellExtras?.status ?? (closed.recordType === "TRADE_CLOSED_SETTLE" ? "SELL_FAILED" : null),
-    exitErrorMsg: closed.exitErrorMsg ?? sellExtras?.errorMsg ?? null,
+    exitStatus:
+      closed.exitMethod === "SETTLE"
+        ? "SETTLED"
+        : (sellExtras?.status ?? null),
+    exitErrorMsg:
+      closed.exitMethod === "SETTLE"
+        ? null
+        : (closed.exitErrorMsg ?? sellExtras?.errorMsg ?? null),
     settlementOutcome: closed.settlementOutcome,
     balanceUsdcAtExit: closed.balanceUsdcAtExit,
     pnlGross: closed.pnlGross,

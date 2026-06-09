@@ -98,6 +98,40 @@ async function finishSingleTrade(payload: ClosedTradePayload): Promise<void> {
   process.exit(0);
 }
 
+async function settleLivePosition(
+  pos: ReturnType<typeof getOpenPositions>[number],
+  resolvedYesPrice: number | null,
+  eventContext: TradeEventContext,
+  opts?: { webhook?: boolean; sellPriceLimit?: number }
+): Promise<ClosedTradePayload> {
+  if (resolvedYesPrice == null) {
+    logger.default.warn(
+      `  SETTLE ${pos.marketId}: market closed but resolution pending (settlementOutcome=PENDING_SETTLEMENT)`
+    );
+  }
+
+  removePosition(pos.marketId);
+
+  let balanceUsdcAtExit: number | undefined;
+  try {
+    balanceUsdcAtExit = (await getAccountBalance()).balanceUsdc;
+  } catch (e: unknown) {
+    const err = e as Error;
+    logger.default.warn(`  balance after settle unavailable: ${err.message ?? String(e)}`);
+  }
+
+  return finalizeLiveSettle(
+    {
+      position: pos,
+      resolvedYesPrice,
+      balanceUsdcAtExit,
+      eventContext,
+      sellPriceLimit: opts?.sellPriceLimit
+    },
+    { webhook: opts?.webhook }
+  );
+}
+
 async function trySettleAfterSellFail(
   pos: ReturnType<typeof getOpenPositions>[number],
   sellErrorMsg: string | undefined,
@@ -117,35 +151,13 @@ async function trySettleAfterSellFail(
     return null;
   }
 
-  let resolvedYes = resolution?.resolvedYesPrice;
-  if (resolvedYes == null) {
-    logger.default.warn(
-      `  SETTLE ${pos.marketId}: market closed but resolution unknown; using settlementOutcome=UNKNOWN`
-    );
-    resolvedYes = 0.5;
-  }
-
-  removePosition(pos.marketId);
-
-  let balanceUsdcAtExit: number | undefined;
-  try {
-    balanceUsdcAtExit = (await getAccountBalance()).balanceUsdc;
-  } catch (e: unknown) {
-    const err = e as Error;
-    logger.default.warn(`  balance after settle unavailable: ${err.message ?? String(e)}`);
-  }
-
-  return finalizeLiveSettle(
-    {
-      position: pos,
-      resolvedYesPrice: resolvedYes,
-      lastSellErrorMsg: sellErrorMsg,
-      balanceUsdcAtExit,
-      eventContext,
-      sellPriceLimit
-    },
-    { webhook: opts?.webhook }
+  const payload = await settleLivePosition(
+    pos,
+    resolution?.resolvedYesPrice ?? null,
+    eventContext,
+    { webhook: opts?.webhook, sellPriceLimit }
   );
+  return payload;
 }
 
 async function closeLivePosition(
@@ -156,6 +168,19 @@ async function closeLivePosition(
   eventContext: TradeEventContext,
   opts?: { webhook?: boolean }
 ): Promise<ClosedTradePayload | null> {
+  const resolution = await connector.getMarketResolution(pos.marketId);
+  if (resolution?.closed) {
+    logger.default.info(`  LIVE SETTLE proactive ${pos.marketId} (market closed, skipping SELL)`);
+    const payload = await settleLivePosition(
+      pos,
+      resolution.resolvedYesPrice,
+      eventContext,
+      { webhook: opts?.webhook }
+    );
+    logger.default.info(`  LIVE SETTLE closed ${pos.marketId}`);
+    return payload;
+  }
+
   const res = await sell(pos.tokenId, pos.sizeShares, priceLimit, liveOrderOpts);
   if (!res.success) {
     logger.default.error(`  LIVE SELL failed ${pos.marketId}: ${res.errorMsg}`);
@@ -201,6 +226,70 @@ async function closeLivePosition(
   );
   logger.default.info(`  LIVE SELL closed ${pos.marketId} orderID=${res.orderID}`);
   return payload;
+}
+
+/** Last N seconds before expiry; widened by loop interval so 15s ticks still catch the window. */
+function liveForceExitWindowSec(): number {
+  return cfg.forceExitSeconds + cfg.loopSeconds;
+}
+
+function eventContextForPosition(
+  pos: ReturnType<typeof getOpenPositions>[number],
+  fallback: TradeEventContext
+): TradeEventContext {
+  const endSec = connector.marketEndSecFromSlug(pos.marketId);
+  const nowSec = Math.floor(Date.now() / 1000);
+  const remainingSec = endSec != null ? Math.max(0, endSec - nowSec) : 0;
+  const yesPrice =
+    pos.side === "YES" ? (pos.entryPrice ?? 0.5) : 1 - (pos.entryPrice ?? 0.5);
+  return {
+    mode: fallback.mode,
+    remainingSec,
+    yesPrice,
+    pUp5m: pos.pUp5mAtEntry ?? fallback.pUp5m
+  };
+}
+
+async function processLivePositionExits(
+  currentMarketId: string,
+  remainingSec: number,
+  yesPrice: number,
+  eventContext: TradeEventContext,
+  opts?: { webhook?: boolean; onClosed?: (payload: ClosedTradePayload) => Promise<void> }
+): Promise<void> {
+  const forceExitWindowSec = liveForceExitWindowSec();
+
+  for (const pos of getOpenPositions()) {
+    const isCurrentMarket = pos.marketId === currentMarketId;
+    const isStale = !isCurrentMarket;
+    const nearExpiry =
+      isCurrentMarket && remainingSec >= 0 && remainingSec <= forceExitWindowSec;
+
+    if (!isStale && !nearExpiry) continue;
+
+    if (isStale) {
+      logger.default.info(
+        `  closing stale position ${pos.marketId} (active market ${currentMarketId})`
+      );
+    }
+
+    const exitQuotePrice = isCurrentMarket
+      ? liveExitQuotePrice(pos.side, yesPrice)
+      : liveExitQuotePrice(pos.side, pos.entryPrice ?? 0.5);
+    const ctx = isCurrentMarket ? eventContext : eventContextForPosition(pos, eventContext);
+
+    const payload = await closeLivePosition(
+      pos,
+      exitQuotePrice,
+      0.01,
+      currentMarketId,
+      ctx,
+      { webhook: opts?.webhook }
+    );
+    if (payload && opts?.onClosed) {
+      await opts.onClosed(payload);
+    }
+  }
 }
 
 async function loop() {
@@ -448,39 +537,31 @@ async function loop() {
 
     if (liveActive) {
       if (singleTradeMode && singleTradeMarketId) {
-        const pos = getOpenPositions().find((p) => p.marketId === singleTradeMarketId);
-        if (pos) {
-          const marketRolled = marketId !== singleTradeMarketId;
-          const nearExpiry =
-            marketMeta.remainingSec >= 0 && marketMeta.remainingSec <= cfg.forceExitSeconds;
-          if (marketRolled || (marketId === singleTradeMarketId && nearExpiry)) {
-            const exitQuotePrice = liveExitQuotePrice(pos.side, features.yesPrice);
-            const payload = await closeLivePosition(
-              pos,
-              exitQuotePrice,
-              0.01,
-              marketId,
-              eventContext,
-              { webhook: true }
-            );
-            if (payload) await finishSingleTrade(payload);
+        await processLivePositionExits(marketId, marketMeta.remainingSec, features.yesPrice, eventContext, {
+          webhook: true,
+          onClosed: async (payload) => {
+            if (singleTradeMarketId && payload.marketId === singleTradeMarketId) {
+              await finishSingleTrade(payload);
+            }
           }
-        }
-      } else if (marketMeta.remainingSec >= 0 && marketMeta.remainingSec <= cfg.forceExitSeconds) {
-        const due = getOpenPositions().filter((p) => p.marketId === marketId);
-        for (const pos of due) {
-          const exitQuotePrice = liveExitQuotePrice(pos.side, features.yesPrice);
-          await closeLivePosition(pos, exitQuotePrice, 0.01, marketId, eventContext, {
-            webhook: true
-          });
-        }
-      } else if (cfg.closeAfterSeconds > 0) {
-        const due = getPositionsDueToClose(cfg.closeAfterSeconds);
-        for (const pos of due) {
-          const exitQuotePrice = liveExitQuotePrice(pos.side, features.yesPrice);
-          await closeLivePosition(pos, exitQuotePrice, 0.01, marketId, eventContext, {
-            webhook: true
-          });
+        });
+      } else {
+        await processLivePositionExits(
+          marketId,
+          marketMeta.remainingSec,
+          features.yesPrice,
+          eventContext,
+          { webhook: true }
+        );
+
+        if (cfg.closeAfterSeconds > 0) {
+          const timed = getPositionsDueToClose(cfg.closeAfterSeconds);
+          for (const pos of timed) {
+            const exitQuotePrice = liveExitQuotePrice(pos.side, features.yesPrice);
+            await closeLivePosition(pos, exitQuotePrice, 0.01, marketId, eventContext, {
+              webhook: true
+            });
+          }
         }
       }
     }
