@@ -358,6 +358,98 @@ export async function getTokenIdsForCondition(conditionId: string): Promise<Toke
   }
 }
 
+export type TokenAskSnapshot = {
+  bestAsk: number;
+  tickSize: number;
+  minOrderSize: number;
+};
+
+export type TokenBookProbe =
+  | { ok: true; snapshot: TokenAskSnapshot }
+  | { ok: false; reason: "no_asks" | "unavailable" };
+
+function parseBookLevels(
+  levels: Array<{ price: string; size: string }>,
+  side: "ask" | "bid"
+): number | null {
+  let best: number | null = null;
+  for (const level of levels) {
+    const price = Number.parseFloat(level.price);
+    const size = Number.parseFloat(level.size);
+    if (!Number.isFinite(price) || price <= 0 || !Number.isFinite(size) || size <= 0) {
+      continue;
+    }
+    if (best == null) {
+      best = price;
+      continue;
+    }
+    best = side === "ask" ? Math.min(best, price) : Math.max(best, price);
+  }
+  return best;
+}
+
+async function fetchTokenOrderBook(tokenId: string) {
+  const client = getPublicClient();
+  return client.getOrderBook(tokenId);
+}
+
+export async function probeTokenAskBook(tokenId: string): Promise<TokenBookProbe> {
+  try {
+    const book = await fetchTokenOrderBook(tokenId);
+    const asks = book.asks ?? [];
+    if (!asks.length) {
+      return { ok: false, reason: "no_asks" };
+    }
+
+    const bestAsk = parseBookLevels(asks, "ask");
+    if (bestAsk == null) {
+      return { ok: false, reason: "no_asks" };
+    }
+
+    const tickSize = Number.parseFloat(book.tick_size) || 0.01;
+    const minOrderSize = Number.parseFloat(book.min_order_size) || 0;
+    return { ok: true, snapshot: { bestAsk, tickSize, minOrderSize } };
+  } catch (e: unknown) {
+    const err = e as Error;
+    logger.default.warn(`CLOB ask book probe failed for ${tokenId}: ${err.message ?? String(e)}`);
+    return { ok: false, reason: "unavailable" };
+  }
+}
+
+export type TokenBidSnapshot = {
+  bestBid: number;
+  tickSize: number;
+  minOrderSize: number;
+  bids: Array<{ price: string; size: string }>;
+};
+
+export type TokenBidBookProbe =
+  | { ok: true; snapshot: TokenBidSnapshot }
+  | { ok: false; reason: "no_bids" | "unavailable" };
+
+export async function probeTokenBidBook(tokenId: string): Promise<TokenBidBookProbe> {
+  try {
+    const book = await fetchTokenOrderBook(tokenId);
+    const bids = book.bids ?? [];
+    if (!bids.length) {
+      return { ok: false, reason: "no_bids" };
+    }
+
+    const bestBid = parseBookLevels(bids, "bid");
+    if (bestBid == null) {
+      return { ok: false, reason: "no_bids" };
+    }
+
+    const tickSize = Number.parseFloat(book.tick_size) || 0.01;
+    const minOrderSize = Number.parseFloat(book.min_order_size) || 0;
+    return { ok: true, snapshot: { bestBid, tickSize, minOrderSize, bids } };
+  } catch (e: unknown) {
+    const err = e as Error;
+    logger.default.warn(`CLOB bid book probe failed for ${tokenId}: ${err.message ?? String(e)}`);
+    return { ok: false, reason: "unavailable" };
+  }
+}
+
 export type PlaceOrderParams = {
   tokenId: string;
   side: "BUY" | "SELL";

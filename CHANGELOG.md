@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+- Changed: Live FAK sells use CLOB best-bid pricing with `EXIT_BOOK_SLIPPAGE` / `EXIT_BOOK_SLIPPAGE_URGENT`, skip when the bid book is empty, and log thin-book depth warnings (`orderExecution.ts`, `paperTrader.ts`, `main.ts`, `config.ts`).
+- Changed: Live FAK buys use CLOB best-ask pricing with `ENTRY_BOOK_SLIPPAGE` (default 0.02) and skip when the token book has no asks (`orderExecution.ts`, `paperTrader.ts`, `main.ts`, `config.ts`).
 - Fixed: Live entry logs `OPEN` only after a successful FAK buy, caps at two FAK attempts per market, and reads Gamma resolution without inventing `exitReal=0.50` (`main.ts`, `polymarket.ts`, `sheetsEvent.ts`).
 - Fixed: Live exits use FAK sells, proactive Gamma settlement before SELL, plausible-balance fee math in `tradeWebhook.ts`, and settlement webhooks with `exitStatus=SETTLED` (`orderExecution.ts`, `main.ts`, `liveTrader.ts`, `sheetsEvent.ts`).
 - Fixed: `src/main.ts` live mode closes or settles positions when the 5m market rolls (stale `open-positions.json` entries) and widens force-exit to `FORCE_EXIT_SECONDS + LOOP_SECONDS` so 15s ticks still emit `TRADE_CLOSED_*` webhooks before expiry.

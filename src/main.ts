@@ -2,7 +2,13 @@ import { cfg } from "./config.js";
 import { parseCliArgs } from "./cliArgs.js";
 import { validateBotEnv } from "./envCheck.js";
 import { PolymarketConnector } from "./connectors/polymarket.js";
-import { buy, getAccountBalance, getTokenIdsForCondition } from "./connectors/orderExecution.js";
+import {
+  buy,
+  getAccountBalance,
+  getTokenIdsForCondition,
+  probeTokenAskBook,
+  probeTokenBidBook
+} from "./connectors/orderExecution.js";
 import { getWalletWinrates } from "./connectors/walletPerformance.js";
 import { buildFeatures } from "./engine/features.js";
 import { predict } from "./engine/predictor.js";
@@ -16,7 +22,13 @@ import {
 } from "./engine/positionStore.js";
 import { sell } from "./connectors/orderExecution.js";
 import { finalizeLiveClose, finalizeLiveSettle, isSellErrorLikelySettled } from "./engine/liveTrader.js";
-import { PaperTrader, isValidEntryPrice, liveEntryPriceLimit } from "./engine/paperTrader.js";
+import {
+  PaperTrader,
+  bidDepthAtOrAbove,
+  isValidEntryPrice,
+  liveEntryPriceLimitFromAsk,
+  liveExitPriceLimitFromBid
+} from "./engine/paperTrader.js";
 import {
   buildSheetsFakFailEvent,
   buildSheetsSkipEvent,
@@ -74,6 +86,52 @@ async function emitSheetsEventOnce(
 
 function liveExitQuotePrice(side: "YES" | "NO", yesPrice: number): number {
   return Math.round((side === "YES" ? yesPrice : 1 - yesPrice) * 100) / 100;
+}
+
+type LiveSellPricing = {
+  priceLimit: number;
+  exitQuotePrice: number;
+  bestBid: number;
+  slippage: number;
+};
+
+async function resolveLiveSellPricing(
+  pos: ReturnType<typeof getOpenPositions>[number],
+  gammaExitQuote: number,
+  urgent: boolean
+): Promise<LiveSellPricing | null> {
+  const slippage = urgent ? cfg.exitBookSlippageUrgent : cfg.exitBookSlippage;
+  const bookProbe = await probeTokenBidBook(pos.tokenId);
+
+  if (!bookProbe.ok) {
+    if (bookProbe.reason === "no_bids") {
+      logger.default.warn(
+        `  SKIP SELL | no bids in book for ${pos.marketId} (${pos.side}, gamma quote ${gammaExitQuote.toFixed(3)})`
+      );
+    } else {
+      logger.default.warn(
+        `  SKIP SELL | CLOB bid book unavailable for ${pos.marketId} (${pos.side})`
+      );
+    }
+    return null;
+  }
+
+  const { bestBid, tickSize, bids } = bookProbe.snapshot;
+  const priceLimit = liveExitPriceLimitFromBid(bestBid, tickSize, slippage);
+  const depth = bidDepthAtOrAbove(bids, priceLimit);
+
+  logger.default.info(
+    `  live exit bestBid=${bestBid.toFixed(3)} limit=${priceLimit.toFixed(3)} ` +
+      `(gamma quote ${gammaExitQuote.toFixed(3)} − slippage ${slippage}) depth@${priceLimit.toFixed(3)}=${depth}`
+  );
+
+  if (depth > 0 && depth < pos.sizeShares) {
+    logger.default.warn(
+      `  thin bid book for ${pos.marketId}: depth ${depth} < size ${pos.sizeShares} (FAK may partial-fill)`
+    );
+  }
+
+  return { priceLimit, exitQuotePrice: bestBid, bestBid, slippage };
 }
 
 function estimateEntryFeeUsd(notionalUsd: number, feeRateBps: number): number {
@@ -163,11 +221,10 @@ async function trySettleAfterSellFail(
 
 async function closeLivePosition(
   pos: ReturnType<typeof getOpenPositions>[number],
-  exitQuotePrice: number,
-  priceLimit: number,
+  gammaExitQuote: number,
   currentMarketId: string,
   eventContext: TradeEventContext,
-  opts?: { webhook?: boolean }
+  opts?: { webhook?: boolean; urgent?: boolean }
 ): Promise<ClosedTradePayload | null> {
   const resolution = await connector.getMarketResolution(pos.marketId);
   if (resolution?.closed) {
@@ -182,6 +239,12 @@ async function closeLivePosition(
     return payload;
   }
 
+  const pricing = await resolveLiveSellPricing(pos, gammaExitQuote, opts?.urgent === true);
+  if (!pricing) {
+    return null;
+  }
+
+  const { priceLimit, exitQuotePrice } = pricing;
   const res = await sell(pos.tokenId, pos.sizeShares, priceLimit, liveOrderOpts);
   if (!res.success) {
     logger.default.error(`  LIVE SELL failed ${pos.marketId}: ${res.errorMsg}`);
@@ -274,19 +337,16 @@ async function processLivePositionExits(
       );
     }
 
-    const exitQuotePrice = isCurrentMarket
+    const gammaExitQuote = isCurrentMarket
       ? liveExitQuotePrice(pos.side, yesPrice)
       : liveExitQuotePrice(pos.side, pos.entryPrice ?? 0.5);
     const ctx = isCurrentMarket ? eventContext : eventContextForPosition(pos, eventContext);
+    const urgent = nearExpiry || isStale;
 
-    const payload = await closeLivePosition(
-      pos,
-      exitQuotePrice,
-      0.01,
-      currentMarketId,
-      ctx,
-      { webhook: opts?.webhook }
-    );
+    const payload = await closeLivePosition(pos, gammaExitQuote, currentMarketId, ctx, {
+      webhook: opts?.webhook,
+      urgent
+    });
     if (payload && opts?.onClosed) {
       await opts.onClosed(payload);
     }
@@ -478,83 +538,124 @@ async function loop() {
         const tokens = await getTokenIdsForCondition(conditionId);
         if (tokens) {
           const tokenId = side === "YES" ? tokens.yesTokenId : tokens.noTokenId;
-          const priceLimit = liveEntryPriceLimit(quotePrice);
-          if (priceLimit > quotePrice) {
-            logger.default.info(
-              `  live entry limit ${priceLimit.toFixed(3)} (quote ${quotePrice.toFixed(3)} + slippage ${cfg.entrySlippage})`
-            );
-          }
-
-          let balanceUsdcAtEntry: number | undefined;
-          try {
-            balanceUsdcAtEntry = (await getAccountBalance()).balanceUsdc;
-          } catch (e: unknown) {
-            const err = e as Error;
-            logger.default.warn(`  balance before buy unavailable: ${err.message ?? String(e)}`);
-          }
-
-          const res = await buy(tokenId, cfg.maxPositionUsd, priceLimit, liveOrderOpts);
-          if (res.success) {
-            const entryPriceReal = res.fillPrice ?? priceLimit;
-            const sizeShares =
-              res.fillShares != null && res.fillShares > 0
-                ? Math.floor(res.fillShares * 100) / 100
-                : Math.floor((cfg.maxPositionUsd / Math.max(0.01, entryPriceReal)) * 100) / 100;
-            const sizeUsd = res.fillUsd ?? cfg.maxPositionUsd;
-            const feeRateBps = res.feeRateBps ?? 0;
-            addPosition({
-              marketId,
-              conditionId,
-              side,
-              tokenId,
-              sizeShares,
-              openedAt: Date.now(),
-              entryPrice: quotePrice,
-              entryPriceReal,
-              entryPriceLimit: priceLimit,
-              entryOrderId: res.orderID,
-              entryStatus: res.status,
-              entryAttemptCount: 1,
-              pUp5mAtEntry: pred.pUp5m,
-              sizeUsd: roundMoney(sizeUsd),
-              slippageEntry: roundPrice(entryPriceReal - quotePrice),
-              feeRateBps,
-              entryFeeUsd: estimateEntryFeeUsd(sizeUsd, feeRateBps),
-              balanceUsdcAtEntry,
-              signals: signalInputs
-            });
-            if (singleTradeMode) {
-              singleTradeEntered = true;
-              singleTradeMarketId = marketId;
-              logger.default.info(`  SINGLE-TRADE entered ${marketId}; waiting for market close…`);
+          const bookProbe = await probeTokenAskBook(tokenId);
+          if (!bookProbe.ok) {
+            if (bookProbe.reason === "no_asks") {
+              action = `SKIP | no asks in ${side} book`;
+              logger.default.info(`  SKIP | no asks in ${side} book (${marketId})`);
+            } else {
+              action = `SKIP | CLOB book unavailable for ${side}`;
+              logger.default.info(`  SKIP | CLOB book unavailable for ${side} (${marketId})`);
             }
-            action =
-              `OPEN ${side} sizeUsd=$${cfg.maxPositionUsd} @ ${quotePrice.toFixed(3)} | ` +
-              `conf=${pred.confidence.toFixed(2)} ${pred.reason}`;
-            logger.default.info(
-              `  LIVE BUY orderID=${res.orderID} status=${res.status} fill=${entryPriceReal.toFixed(4)}`
-            );
-          } else {
-            const failCount = priorFakFails + 1;
-            fakFailCountByMarket.set(marketId, failCount);
-            action = `SKIP | FAK buy failed (${failCount}/${MAX_FAK_BUY_ATTEMPTS}) ${marketId}`;
-            logger.default.error(
-              `  LIVE BUY failed: ${res.errorMsg ?? "unknown"} status=${res.status ?? "?"}`
-            );
             await emitSheetsEventOnce(
-              `${marketId}:ENTRY_FAK_FAILED:${failCount}`,
-              buildSheetsFakFailEvent({
+              `${marketId}:NO_BOOK_LIQUIDITY:${bookProbe.reason}`,
+              buildSheetsSkipEvent({
+                recordType: "SIGNAL_SKIP",
+                skipReason: "NO_BOOK_LIQUIDITY",
                 marketId,
                 side,
                 quotePrice,
-                priceLimit,
                 signals: signalInputs,
-                ctx: eventContext,
-                buyResult: res,
-                entryAttemptCount: failCount,
-                balanceUsdcAtEntry
+                ctx: eventContext
               })
             );
+          } else {
+            const { bestAsk, tickSize } = bookProbe.snapshot;
+            if (!isValidEntryPrice(bestAsk)) {
+              action = `SKIP | best ask ${bestAsk.toFixed(3)} outside valid range`;
+              logger.default.info(
+                `  SKIP | best ask ${bestAsk.toFixed(3)} outside valid range (gamma quote ${quotePrice.toFixed(3)}, ${marketId})`
+              );
+              await emitSheetsEventOnce(
+                `${marketId}:PRICE_OUT_OF_RANGE:BOOK`,
+                buildSheetsSkipEvent({
+                  recordType: "SIGNAL_SKIP",
+                  skipReason: "PRICE_OUT_OF_RANGE",
+                  marketId,
+                  side,
+                  quotePrice,
+                  signals: signalInputs,
+                  ctx: eventContext
+                })
+              );
+            } else {
+              const priceLimit = liveEntryPriceLimitFromAsk(bestAsk, tickSize);
+              logger.default.info(
+                `  live entry bestAsk=${bestAsk.toFixed(3)} limit=${priceLimit.toFixed(3)} (gamma quote ${quotePrice.toFixed(3)} + book slippage ${cfg.entryBookSlippage})`
+              );
+
+              let balanceUsdcAtEntry: number | undefined;
+              try {
+                balanceUsdcAtEntry = (await getAccountBalance()).balanceUsdc;
+              } catch (e: unknown) {
+                const err = e as Error;
+                logger.default.warn(`  balance before buy unavailable: ${err.message ?? String(e)}`);
+              }
+
+              const res = await buy(tokenId, cfg.maxPositionUsd, priceLimit, liveOrderOpts);
+              if (res.success) {
+                const entryPriceReal = res.fillPrice ?? priceLimit;
+                const sizeShares =
+                  res.fillShares != null && res.fillShares > 0
+                    ? Math.floor(res.fillShares * 100) / 100
+                    : Math.floor((cfg.maxPositionUsd / Math.max(0.01, entryPriceReal)) * 100) / 100;
+                const sizeUsd = res.fillUsd ?? cfg.maxPositionUsd;
+                const feeRateBps = res.feeRateBps ?? 0;
+                addPosition({
+                  marketId,
+                  conditionId,
+                  side,
+                  tokenId,
+                  sizeShares,
+                  openedAt: Date.now(),
+                  entryPrice: quotePrice,
+                  entryPriceReal,
+                  entryPriceLimit: priceLimit,
+                  entryOrderId: res.orderID,
+                  entryStatus: res.status,
+                  entryAttemptCount: 1,
+                  pUp5mAtEntry: pred.pUp5m,
+                  sizeUsd: roundMoney(sizeUsd),
+                  slippageEntry: roundPrice(entryPriceReal - quotePrice),
+                  feeRateBps,
+                  entryFeeUsd: estimateEntryFeeUsd(sizeUsd, feeRateBps),
+                  balanceUsdcAtEntry,
+                  signals: signalInputs
+                });
+                if (singleTradeMode) {
+                  singleTradeEntered = true;
+                  singleTradeMarketId = marketId;
+                  logger.default.info(`  SINGLE-TRADE entered ${marketId}; waiting for market close…`);
+                }
+                action =
+                  `OPEN ${side} sizeUsd=$${cfg.maxPositionUsd} @ ${quotePrice.toFixed(3)} | ` +
+                  `conf=${pred.confidence.toFixed(2)} ${pred.reason}`;
+                logger.default.info(
+                  `  LIVE BUY orderID=${res.orderID} status=${res.status} fill=${entryPriceReal.toFixed(4)}`
+                );
+              } else {
+                const failCount = priorFakFails + 1;
+                fakFailCountByMarket.set(marketId, failCount);
+                action = `SKIP | FAK buy failed (${failCount}/${MAX_FAK_BUY_ATTEMPTS}) ${marketId}`;
+                logger.default.error(
+                  `  LIVE BUY failed: ${res.errorMsg ?? "unknown"} status=${res.status ?? "?"}`
+                );
+                await emitSheetsEventOnce(
+                  `${marketId}:ENTRY_FAK_FAILED:${failCount}`,
+                  buildSheetsFakFailEvent({
+                    marketId,
+                    side,
+                    quotePrice,
+                    priceLimit,
+                    signals: signalInputs,
+                    ctx: eventContext,
+                    buyResult: res,
+                    entryAttemptCount: failCount,
+                    balanceUsdcAtEntry
+                  })
+                );
+              }
+            }
           }
         }
       }
@@ -582,9 +683,10 @@ async function loop() {
         if (cfg.closeAfterSeconds > 0) {
           const timed = getPositionsDueToClose(cfg.closeAfterSeconds);
           for (const pos of timed) {
-            const exitQuotePrice = liveExitQuotePrice(pos.side, features.yesPrice);
-            await closeLivePosition(pos, exitQuotePrice, 0.01, marketId, eventContext, {
-              webhook: true
+            const gammaExitQuote = liveExitQuotePrice(pos.side, features.yesPrice);
+            await closeLivePosition(pos, gammaExitQuote, marketId, eventContext, {
+              webhook: true,
+              urgent: true
             });
           }
         }

@@ -17,15 +17,63 @@ export type { ClosedTradePayload, ExecutionStatus, PredictionSignals } from "./t
 
 export const ENTRY_PRICE_MIN = 0.35;
 export const ENTRY_PRICE_MAX = 0.95;
+export const EXIT_PRICE_MIN = 0.01;
 
 export function isValidEntryPrice(price: number): boolean {
   return price >= ENTRY_PRICE_MIN && price <= ENTRY_PRICE_MAX;
 }
 
+function roundPriceToTick(
+  price: number,
+  tickSize: number,
+  bounds?: { min?: number; max?: number }
+): number {
+  let adjusted = price;
+  if (bounds?.max != null) adjusted = Math.min(adjusted, bounds.max);
+  if (bounds?.min != null) adjusted = Math.max(adjusted, bounds.min);
+  if (!Number.isFinite(tickSize) || tickSize <= 0) {
+    return Math.round(adjusted * 100) / 100;
+  }
+  const factor = 1 / tickSize;
+  return Math.round(adjusted * factor) / factor;
+}
+
 /** Live buy limit: quote + ENTRY_SLIPPAGE, capped at ENTRY_PRICE_MAX. */
 export function liveEntryPriceLimit(quotePrice: number): number {
   const bumped = quotePrice + cfg.entrySlippage;
-  return Math.round(Math.min(bumped, ENTRY_PRICE_MAX) * 100) / 100;
+  return roundPriceToTick(bumped, 0.01, { max: ENTRY_PRICE_MAX });
+}
+
+/** Live buy limit from CLOB best ask + ENTRY_BOOK_SLIPPAGE, capped at ENTRY_PRICE_MAX. */
+export function liveEntryPriceLimitFromAsk(bestAsk: number, tickSize = 0.01): number {
+  const bumped = bestAsk + cfg.entryBookSlippage;
+  return roundPriceToTick(bumped, tickSize, { max: ENTRY_PRICE_MAX });
+}
+
+/** Live sell floor from CLOB best bid − slippage, floored at EXIT_PRICE_MIN. */
+export function liveExitPriceLimitFromBid(
+  bestBid: number,
+  tickSize = 0.01,
+  slippage = cfg.exitBookSlippage
+): number {
+  const bumped = bestBid - slippage;
+  return roundPriceToTick(bumped, tickSize, { min: EXIT_PRICE_MIN });
+}
+
+/** Sum bid size at prices ≥ minPrice (shares available if we sell at minPrice). */
+export function bidDepthAtOrAbove(
+  bids: Array<{ price: string; size: string }>,
+  minPrice: number
+): number {
+  let depth = 0;
+  for (const level of bids) {
+    const price = Number.parseFloat(level.price);
+    const size = Number.parseFloat(level.size);
+    if (Number.isFinite(price) && price >= minPrice && Number.isFinite(size) && size > 0) {
+      depth += size;
+    }
+  }
+  return Math.floor(depth * 100) / 100;
 }
 
 type PaperPosition = {

@@ -26,7 +26,8 @@ export type SkipReason =
   | "PRICE_OUT_OF_RANGE"
   | "ALREADY_IN_POSITION"
   | "NEAR_EXPIRY"
-  | "MAX_ENTRY_ATTEMPTS";
+  | "MAX_ENTRY_ATTEMPTS"
+  | "NO_BOOK_LIQUIDITY";
 
 export type TradeEventContext = {
   mode: BotMode;

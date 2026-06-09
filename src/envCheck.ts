@@ -99,6 +99,19 @@ export function validateBotEnv(): void {
   if (!Number.isFinite(cfg.entrySlippage) || cfg.entrySlippage < 0 || cfg.entrySlippage > 0.5) {
     errors.push(`ENTRY_SLIPPAGE must be in [0, 0.5] (got ${cfg.entrySlippage}).`);
   }
+  if (!Number.isFinite(cfg.entryBookSlippage) || cfg.entryBookSlippage < 0 || cfg.entryBookSlippage > 0.5) {
+    errors.push(`ENTRY_BOOK_SLIPPAGE must be in [0, 0.5] (got ${cfg.entryBookSlippage}).`);
+  }
+  if (!Number.isFinite(cfg.exitBookSlippage) || cfg.exitBookSlippage < 0 || cfg.exitBookSlippage > 0.5) {
+    errors.push(`EXIT_BOOK_SLIPPAGE must be in [0, 0.5] (got ${cfg.exitBookSlippage}).`);
+  }
+  if (
+    !Number.isFinite(cfg.exitBookSlippageUrgent) ||
+    cfg.exitBookSlippageUrgent < 0 ||
+    cfg.exitBookSlippageUrgent > 0.5
+  ) {
+    errors.push(`EXIT_BOOK_SLIPPAGE_URGENT must be in [0, 0.5] (got ${cfg.exitBookSlippageUrgent}).`);
+  }
   if (!Number.isFinite(cfg.forceExitSeconds) || cfg.forceExitSeconds < 1 || cfg.forceExitSeconds >= 120) {
     errors.push(`FORCE_EXIT_SECONDS must be in [1, 119] (got ${cfg.forceExitSeconds}).`);
   }
