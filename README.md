@@ -147,6 +147,8 @@ Copy `.env.example` to `.env` and adjust as needed.
 
 **CLOB smoke test:** `npm run clob:verify` (optional condition id as `0x` + 64 hex) hits `getOk` / `version` and can resolve YES/NO token ids via `getClobMarketInfo`.
 
+**CLOB balance:** `npm run clob:balance` connects with `PRIVATE_KEY` (and proxy settings if needed) and prints your USDC balance on Polymarket CLOB.
+
 ---
 
 ## 📊 Compare UI in detail

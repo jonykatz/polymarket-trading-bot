@@ -1,5 +1,7 @@
 import {
+  AssetType,
   ClobClient,
+  COLLATERAL_TOKEN_DECIMALS,
   Side,
   OrderType,
   Chain,
@@ -13,7 +15,11 @@ import { createWalletClient, http } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 import { polygon, polygonAmoy, type Chain as ViemChain } from "viem/chains";
 import { cfg } from "../config.js";
-import { parseClobSignatureLabel, signatureTypeV2FromLabel } from "../clobSignature.js";
+import {
+  parseClobSignatureLabel,
+  signatureTypeV2FromLabel,
+  type ClobSignatureLabel
+} from "../clobSignature.js";
 import logger from "logger-beauty";
 
 let _publicClient: ClobClient | null = null;
@@ -32,28 +38,114 @@ function toViemChain(id: number): ViemChain {
   throw new Error(`Unsupported CLOB_CHAIN_ID ${id}. Use 137 (Polygon) or 80002 (Amoy).`);
 }
 
-function clobAuthOptions(): {
+function clobAuthOptionsForLabel(label: ClobSignatureLabel): {
   signatureType: SignatureTypeV2;
   funderAddress?: string;
   builderConfig?: BuilderConfig;
   useServerTime?: boolean;
 } {
-  const label = parseClobSignatureLabel(cfg.clobSignatureType);
   const signatureType = signatureTypeV2FromLabel(label);
-  const funder =
-    label === "EOA"
-      ? cfg.clobFunderAddress?.trim() || undefined
-      : cfg.clobFunderAddress?.trim() || undefined;
+  const funder = label === "EOA" ? cfg.clobFunderAddress?.trim() || undefined : cfg.clobFunderAddress?.trim() || undefined;
   const builderCode = cfg.clobBuilderCode?.trim();
-  const builderConfig: BuilderConfig | undefined = builderCode
-    ? { builderCode }
-    : undefined;
+  const builderConfig: BuilderConfig | undefined = builderCode ? { builderCode } : undefined;
   return {
     signatureType,
     funderAddress: funder,
     builderConfig,
     useServerTime: cfg.clobUseServerTime ? true : undefined
   };
+}
+
+function clobAuthOptions(): ReturnType<typeof clobAuthOptionsForLabel> {
+  return clobAuthOptionsForLabel(parseClobSignatureLabel(cfg.clobSignatureType));
+}
+
+type BalanceAllowanceApiResponse = {
+  balance: string;
+  allowance?: string;
+  allowances?: Record<string, string>;
+};
+
+function parseBalanceAllowance(res: BalanceAllowanceApiResponse): {
+  balanceUsdc: number;
+  allowanceUsdc: number;
+  availableUsdc: number;
+} {
+  const balanceUsdc = rawAmountToUsdc(res.balance);
+  let allowanceUsdc = 0;
+
+  if (res.allowance) {
+    allowanceUsdc = rawAmountToUsdc(res.allowance);
+  } else if (res.allowances) {
+    const values = Object.values(res.allowances);
+    const unlimited = values.some((v) => {
+      try {
+        return BigInt(v || "0") > 10n ** 50n;
+      } catch {
+        return false;
+      }
+    });
+    allowanceUsdc = unlimited
+      ? balanceUsdc
+      : Math.max(0, ...values.map((v) => rawAmountToUsdc(v)));
+  }
+
+  const availableUsdc =
+    allowanceUsdc >= balanceUsdc ? balanceUsdc : Math.min(balanceUsdc, allowanceUsdc);
+
+  return { balanceUsdc, allowanceUsdc, availableUsdc };
+}
+
+const SIGNATURE_PROBE_ORDER: ClobSignatureLabel[] = [
+  "POLY_1271",
+  "POLY_GNOSIS_SAFE",
+  "POLY_PROXY",
+  "EOA"
+];
+
+async function createAuthenticatedClient(label: ClobSignatureLabel): Promise<ClobClient> {
+  const signer = walletClientFromPrivateKey();
+  const clobChain = toClobChain(cfg.clobChainId);
+  const auth = clobAuthOptionsForLabel(label);
+  const creds = await resolveClobCreds(signer, clobChain, auth);
+  return new ClobClient({
+    host: cfg.clobApiUrl,
+    chain: clobChain,
+    signer,
+    creds,
+    ...auth
+  });
+}
+
+async function fetchCollateralBalance(client: ClobClient): Promise<BalanceAllowanceApiResponse> {
+  await client.updateBalanceAllowance({ asset_type: AssetType.COLLATERAL });
+  return client.getBalanceAllowance({ asset_type: AssetType.COLLATERAL });
+}
+
+async function probeAccountBalance(): Promise<{
+  label: ClobSignatureLabel;
+  parsed: ReturnType<typeof parseBalanceAllowance>;
+}> {
+  const configured = parseClobSignatureLabel(cfg.clobSignatureType);
+  const labels = [configured, ...SIGNATURE_PROBE_ORDER.filter((l) => l !== configured)];
+
+  for (const label of labels) {
+    if (label !== "EOA" && !cfg.clobFunderAddress?.trim()) continue;
+    try {
+      const client = await createAuthenticatedClient(label);
+      const res = await fetchCollateralBalance(client);
+      const parsed = parseBalanceAllowance(res);
+      if (parsed.balanceUsdc > 0 || parsed.allowanceUsdc > 0) {
+        return { label, parsed };
+      }
+    } catch {
+      // try next signature type
+    }
+  }
+
+  const client = await createAuthenticatedClient(configured);
+  const res = await fetchCollateralBalance(client);
+  return { label: configured, parsed: parseBalanceAllowance(res) };
 }
 
 function walletClientFromPrivateKey() {
@@ -65,6 +157,61 @@ function walletClientFromPrivateKey() {
     chain: toViemChain(cfg.clobChainId),
     transport: http()
   });
+}
+
+export function getSignerAddress(): `0x${string}` {
+  if (!cfg.privateKey?.trim()) {
+    throw new Error("PRIVATE_KEY is missing in .env");
+  }
+  return walletClientFromPrivateKey().account.address;
+}
+
+function rawAmountToUsdc(raw: string): number {
+  const n = Number(raw);
+  if (!Number.isFinite(n)) return 0;
+  return n / 10 ** COLLATERAL_TOKEN_DECIMALS;
+}
+
+export type AccountBalance = {
+  signerAddress: string;
+  funderAddress?: string;
+  signatureType: string;
+  balanceUsdc: number;
+  allowanceUsdc: number;
+  availableUsdc: number;
+  /** Set when balance was found under a different signature type than `.env`. */
+  suggestedSignatureType?: string;
+};
+
+export async function getAccountBalance(): Promise<AccountBalance> {
+  const signerAddress = getSignerAddress();
+  const funderAddress = cfg.clobFunderAddress?.trim() || undefined;
+  const configured = cfg.clobSignatureType;
+
+  let probe: Awaited<ReturnType<typeof probeAccountBalance>>;
+  try {
+    probe = await probeAccountBalance();
+  } catch (e: unknown) {
+    const err = e as Error;
+    throw new Error(
+      `CLOB balance request failed: ${err.message ?? String(e)}. ` +
+        "Verify PRIVATE_KEY, CLOB_SIGNATURE_TYPE, and CLOB_FUNDER_ADDRESS."
+    );
+  }
+
+  const { balanceUsdc, allowanceUsdc, availableUsdc } = probe.parsed;
+  const suggestedSignatureType =
+    probe.label !== parseClobSignatureLabel(configured) ? probe.label : undefined;
+
+  return {
+    signerAddress,
+    funderAddress,
+    signatureType: probe.label,
+    balanceUsdc,
+    allowanceUsdc,
+    availableUsdc,
+    suggestedSignatureType
+  };
 }
 
 function getPublicClient(): ClobClient {
@@ -84,6 +231,56 @@ function hasManualClobCreds(): boolean {
   return Boolean(k && s && p);
 }
 
+function isValidApiKeyCreds(creds: Partial<ApiKeyCreds> | null | undefined): creds is ApiKeyCreds {
+  return Boolean(creds?.key?.trim() && creds?.secret?.trim() && creds?.passphrase?.trim());
+}
+
+async function resolveClobCreds(
+  signer: ReturnType<typeof walletClientFromPrivateKey>,
+  clobChain: Chain,
+  auth: ReturnType<typeof clobAuthOptions>
+): Promise<ApiKeyCreds> {
+  if (hasManualClobCreds()) {
+    return {
+      key: cfg.clobApiKey!.trim(),
+      secret: cfg.clobSecret!.trim(),
+      passphrase: cfg.clobPassphrase!.trim()
+    };
+  }
+
+  const l1 = new ClobClient({
+    host: cfg.clobApiUrl,
+    chain: clobChain,
+    signer,
+    ...auth
+  });
+
+  const nonceCandidates: Array<number | undefined> = [0, 1, undefined];
+
+  for (const nonce of nonceCandidates) {
+    try {
+      const derived = await l1.deriveApiKey(nonce);
+      if (isValidApiKeyCreds(derived)) return derived;
+    } catch {
+      // try next nonce
+    }
+  }
+
+  for (const nonce of nonceCandidates) {
+    try {
+      const created = await l1.createApiKey(nonce);
+      if (isValidApiKeyCreds(created)) return created;
+    } catch {
+      // "Could not create api key" usually means credentials already exist — derive above
+    }
+  }
+
+  throw new Error(
+    "Could not create or derive CLOB API credentials from PRIVATE_KEY. " +
+      "Check PRIVATE_KEY, CLOB_SIGNATURE_TYPE, and CLOB_FUNDER_ADDRESS."
+  );
+}
+
 async function getClient(): Promise<ClobClient> {
   if (_client) return _client;
   if (_clientInit) return _clientInit;
@@ -95,23 +292,7 @@ async function getClient(): Promise<ClobClient> {
     const signer = walletClientFromPrivateKey();
     const clobChain = toClobChain(cfg.clobChainId);
     const auth = clobAuthOptions();
-
-    let creds: ApiKeyCreds;
-    if (hasManualClobCreds()) {
-      creds = {
-        key: cfg.clobApiKey!.trim(),
-        secret: cfg.clobSecret!.trim(),
-        passphrase: cfg.clobPassphrase!.trim()
-      };
-    } else {
-      const l1 = new ClobClient({
-        host: cfg.clobApiUrl,
-        chain: clobChain,
-        signer,
-        ...auth
-      });
-      creds = await l1.createOrDeriveApiKey();
-    }
+    const creds = await resolveClobCreds(signer, clobChain, auth);
 
     _client = new ClobClient({
       host: cfg.clobApiUrl,

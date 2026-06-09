@@ -154,6 +154,61 @@ export function validateBotEnv(): void {
   console.log("Environment OK — starting bot.");
 }
 
+export function validateClobAccountEnv(): void {
+  const errors: string[] = [];
+  const pk = (process.env.PRIVATE_KEY ?? "").trim();
+  const key = (process.env.CLOB_API_KEY ?? "").trim();
+  const secret = (process.env.CLOB_SECRET ?? "").trim();
+  const pass = (process.env.CLOB_PASS_PHRASE ?? "").trim();
+
+  if (!pk) errors.push("PRIVATE_KEY is missing.");
+  else if (!validPrivateKey(pk)) errors.push("PRIVATE_KEY must be 64 hex chars (optional 0x prefix).");
+  else if (isPlaceholder(pk)) errors.push("PRIVATE_KEY is still the example placeholder — set your real key.");
+
+  const clobSet = [key, secret, pass].filter(Boolean).length;
+  if (clobSet > 0 && clobSet < 3) {
+    errors.push("Either omit CLOB_API_KEY, CLOB_SECRET, CLOB_PASS_PHRASE (auto-derive) or set all three.");
+  } else if (clobSet === 3) {
+    if (isPlaceholder(key)) errors.push("CLOB_API_KEY is still a placeholder.");
+    if (isPlaceholder(secret)) errors.push("CLOB_SECRET is still a placeholder.");
+    if (isPlaceholder(pass)) errors.push("CLOB_PASS_PHRASE is still a placeholder.");
+  }
+
+  if (!validHttpUrl(cfg.clobApiUrl)) {
+    errors.push(`CLOB_API_URL must be http(s): got "${cfg.clobApiUrl}"`);
+  }
+
+  const sigNorm = tryParseClobSignatureLabel(cfg.clobSignatureType);
+  if (!sigNorm) {
+    errors.push(
+      `CLOB_SIGNATURE_TYPE must be one of: EOA, POLY_PROXY, POLY_GNOSIS_SAFE, POLY_1271 (got "${cfg.clobSignatureType}")`
+    );
+  }
+  if (sigNorm && sigNorm !== "EOA") {
+    const f = cfg.clobFunderAddress?.trim() ?? "";
+    if (!f) {
+      errors.push(
+        `CLOB_FUNDER_ADDRESS is required when CLOB_SIGNATURE_TYPE is ${sigNorm} (Polymarket proxy/safe trading).`
+      );
+    } else if (!validEthAddress(f)) {
+      errors.push(`CLOB_FUNDER_ADDRESS must be a 0x-prefixed 40-hex address (got "${f}").`);
+    }
+  } else if (cfg.clobFunderAddress?.trim() && !validEthAddress(cfg.clobFunderAddress)) {
+    errors.push(`CLOB_FUNDER_ADDRESS must be a valid 0x address when set (got "${cfg.clobFunderAddress}").`);
+  }
+
+  if (!Number.isFinite(cfg.clobChainId) || !Number.isInteger(cfg.clobChainId) || cfg.clobChainId < 1) {
+    errors.push(`CLOB_CHAIN_ID must be a positive integer (got ${cfg.clobChainId}).`);
+  }
+
+  if (errors.length) {
+    console.error(
+      "CLOB account check failed. Fix .env and try again:\n\n  • " + errors.join("\n  • ")
+    );
+    process.exit(1);
+  }
+}
+
 export function validateUiEnv(): void {
   const errors: string[] = [];
 

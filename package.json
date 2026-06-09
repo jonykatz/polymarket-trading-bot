@@ -9,6 +9,7 @@
     "build": "tsc -p tsconfig.json",
     "start": "node dist/main.js",
     "clob:verify": "tsx src/clobVerify.ts",
+    "clob:balance": "tsx src/clobBalance.ts",
     "binance:verify": "tsx src/binanceVerify.ts"
   },
   "dependencies": {
