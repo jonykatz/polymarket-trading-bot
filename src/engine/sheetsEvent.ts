@@ -20,6 +20,7 @@ export type SheetsRecordType =
   | TradeRecordType
   | "SIGNAL_SKIP"
   | "ENTRY_FAK_FAILED"
+  | "EXIT_SKIP"
   | "NO_TRADE";
 
 export type SkipReason =
@@ -27,7 +28,8 @@ export type SkipReason =
   | "ALREADY_IN_POSITION"
   | "NEAR_EXPIRY"
   | "MAX_ENTRY_ATTEMPTS"
-  | "NO_BOOK_LIQUIDITY";
+  | "NO_BOOK_LIQUIDITY"
+  | "BOOK_TOO_EXPENSIVE";
 
 export type TradeEventContext = {
   mode: BotMode;
@@ -247,6 +249,72 @@ export function buildSheetsEventFromClose(
     walletDeltaUsd: walletDelta,
     executionStatus: closed.executionStatus,
     notes: null
+  };
+}
+
+export function buildSheetsExitSkipEvent(input: {
+  position: LivePosition;
+  gammaExitQuote: number;
+  skipReason: "NO_BOOK_LIQUIDITY";
+  ctx: TradeEventContext;
+  notes?: string;
+}): SheetsTradeEventPayload {
+  const timestamp = new Date().toISOString();
+  const signals = input.position.signals ?? {
+    confidenceScore: 0,
+    confidenceThreshold: cfg.confidenceThreshold,
+    trendScore: 0,
+    emaSignal: 0,
+    rsiValue: 50,
+    whaleSignal: 0,
+    whaleCount: 0,
+    llmBias: 0,
+    btcScore: 0,
+    btcSnapshotStale: false
+  };
+  const entryQuote = input.position.entryPrice ?? null;
+  return {
+    eventId: newEventId("exit-skip"),
+    ...baseFromSignals(signals, input.ctx, timestamp),
+    recordType: "EXIT_SKIP",
+    skipReason: input.skipReason,
+    marketId: input.position.marketId,
+    side: input.position.side,
+    quotePrice: roundPrice(input.gammaExitQuote),
+    entryAttempted: true,
+    entryOrderType: "FAK",
+    entryPriceQuote: entryQuote != null ? roundPrice(entryQuote) : null,
+    entryPriceLimit: input.position.entryPriceLimit ?? null,
+    entryPriceReal: input.position.entryPriceReal ?? null,
+    slippageEntry: input.position.slippageEntry ?? null,
+    sizeUsdPlanned: input.position.sizeUsd ?? cfg.maxPositionUsd,
+    sizeUsdFilled: input.position.sizeUsd ?? null,
+    entryNotionalUsd: input.position.sizeUsd ?? null,
+    entryFeeUsd: input.position.entryFeeUsd ?? null,
+    entryCashOutUsd: null,
+    entryOrderId: input.position.entryOrderId ?? null,
+    entryStatus: input.position.entryStatus ?? null,
+    entryErrorMsg: null,
+    entryAttemptCount: input.position.entryAttemptCount ?? 1,
+    balanceUsdcAtEntry: input.position.balanceUsdcAtEntry ?? null,
+    exitMethod: "FAK",
+    exitOrderType: "FAK",
+    exitPriceQuote: roundPrice(input.gammaExitQuote),
+    exitPriceLimit: null,
+    exitPriceReal: null,
+    slippageExit: null,
+    exitOrderId: null,
+    exitStatus: "SKIPPED",
+    exitErrorMsg: input.notes ?? "no bids in book",
+    settlementOutcome: null,
+    balanceUsdcAtExit: null,
+    pnlGross: null,
+    polymarketFee: null,
+    polymarketFeePct: null,
+    pnlNet: null,
+    walletDeltaUsd: null,
+    executionStatus: "EXECUTED",
+    notes: input.notes ?? null
   };
 }
 

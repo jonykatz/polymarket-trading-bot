@@ -18,7 +18,8 @@ import {
   getOpenPositions,
   addPosition,
   getPositionsDueToClose,
-  removePosition
+  removePosition,
+  updatePosition
 } from "./engine/positionStore.js";
 import { sell } from "./connectors/orderExecution.js";
 import { finalizeLiveClose, finalizeLiveSettle, isSellErrorLikelySettled } from "./engine/liveTrader.js";
@@ -30,6 +31,7 @@ import {
   liveExitPriceLimitFromBid
 } from "./engine/paperTrader.js";
 import {
+  buildSheetsExitSkipEvent,
   buildSheetsFakFailEvent,
   buildSheetsSkipEvent,
   postTradeEventWebhook,
@@ -60,6 +62,7 @@ let shuttingDown = false;
 const postedSheetEventKeys = new Set<string>();
 const fakFailCountByMarket = new Map<string, number>();
 const MAX_FAK_BUY_ATTEMPTS = 2;
+const PARTIAL_FILL_EPS_SHARES = 0.01;
 
 function botMode(): BotMode {
   if (singleTradeMode) return "single-trade";
@@ -95,11 +98,15 @@ type LiveSellPricing = {
   slippage: number;
 };
 
+type LiveSellPricingResult =
+  | { ok: true; pricing: LiveSellPricing }
+  | { ok: false; reason: "no_bids" | "unavailable" };
+
 async function resolveLiveSellPricing(
   pos: ReturnType<typeof getOpenPositions>[number],
   gammaExitQuote: number,
   urgent: boolean
-): Promise<LiveSellPricing | null> {
+): Promise<LiveSellPricingResult> {
   const slippage = urgent ? cfg.exitBookSlippageUrgent : cfg.exitBookSlippage;
   const bookProbe = await probeTokenBidBook(pos.tokenId);
 
@@ -113,7 +120,7 @@ async function resolveLiveSellPricing(
         `  SKIP SELL | CLOB bid book unavailable for ${pos.marketId} (${pos.side})`
       );
     }
-    return null;
+    return { ok: false, reason: bookProbe.reason };
   }
 
   const { bestBid, tickSize, bids } = bookProbe.snapshot;
@@ -131,7 +138,10 @@ async function resolveLiveSellPricing(
     );
   }
 
-  return { priceLimit, exitQuotePrice: bestBid, bestBid, slippage };
+  return {
+    ok: true,
+    pricing: { priceLimit, exitQuotePrice: bestBid, bestBid, slippage }
+  };
 }
 
 function estimateEntryFeeUsd(notionalUsd: number, feeRateBps: number): number {
@@ -239,12 +249,24 @@ async function closeLivePosition(
     return payload;
   }
 
-  const pricing = await resolveLiveSellPricing(pos, gammaExitQuote, opts?.urgent === true);
-  if (!pricing) {
+  const sellPricing = await resolveLiveSellPricing(pos, gammaExitQuote, opts?.urgent === true);
+  if (!sellPricing.ok) {
+    if (sellPricing.reason === "no_bids" && opts?.webhook !== false) {
+      await emitSheetsEventOnce(
+        `${pos.marketId}:EXIT_SKIP:NO_BIDS`,
+        buildSheetsExitSkipEvent({
+          position: pos,
+          gammaExitQuote,
+          skipReason: "NO_BOOK_LIQUIDITY",
+          ctx: eventContext,
+          notes: "no bids in book"
+        })
+      );
+    }
     return null;
   }
 
-  const { priceLimit, exitQuotePrice } = pricing;
+  const { priceLimit, exitQuotePrice } = sellPricing.pricing;
   const res = await sell(pos.tokenId, pos.sizeShares, priceLimit, liveOrderOpts);
   if (!res.success) {
     logger.default.error(`  LIVE SELL failed ${pos.marketId}: ${res.errorMsg}`);
@@ -259,6 +281,27 @@ async function closeLivePosition(
       logger.default.info(`  LIVE SETTLE closed ${pos.marketId} (sell failed, market resolved)`);
     }
     return settled;
+  }
+
+  const filledShares =
+    res.fillShares != null && res.fillShares > 0
+      ? Math.floor(res.fillShares * 100) / 100
+      : pos.sizeShares;
+  const remainingShares = Math.floor((pos.sizeShares - filledShares) * 100) / 100;
+
+  if (remainingShares > PARTIAL_FILL_EPS_SHARES) {
+    const ratio = remainingShares / pos.sizeShares;
+    const remainingUsd =
+      pos.sizeUsd != null && pos.sizeUsd > 0 ? roundMoney(pos.sizeUsd * ratio) : undefined;
+    updatePosition(pos.marketId, {
+      sizeShares: remainingShares,
+      ...(remainingUsd != null ? { sizeUsd: remainingUsd } : {})
+    });
+    logger.default.warn(
+      `  LIVE SELL partial ${pos.marketId}: sold ${filledShares}/${pos.sizeShares} shares, ` +
+        `${remainingShares} remaining — retry next tick`
+    );
+    return null;
   }
 
   const quoteForSlippage =
@@ -579,6 +622,28 @@ async function loop() {
                 })
               );
             } else {
+              const spread = roundPrice(bestAsk - quotePrice);
+              logger.default.info(
+                `  entry spread=${spread.toFixed(3)} bestAsk=${bestAsk.toFixed(3)} gamma=${quotePrice.toFixed(3)} max=${cfg.entryBookMaxSpread}`
+              );
+              if (spread > cfg.entryBookMaxSpread) {
+                action = `SKIP | BOOK_TOO_EXPENSIVE`;
+                logger.default.info(
+                  `  SKIP | BOOK_TOO_EXPENSIVE spread ${spread.toFixed(3)} > ${cfg.entryBookMaxSpread} (${marketId})`
+                );
+                await emitSheetsEventOnce(
+                  `${marketId}:BOOK_TOO_EXPENSIVE`,
+                  buildSheetsSkipEvent({
+                    recordType: "SIGNAL_SKIP",
+                    skipReason: "BOOK_TOO_EXPENSIVE",
+                    marketId,
+                    side,
+                    quotePrice,
+                    signals: signalInputs,
+                    ctx: eventContext
+                  })
+                );
+              } else {
               const priceLimit = liveEntryPriceLimitFromAsk(bestAsk, tickSize);
               logger.default.info(
                 `  live entry bestAsk=${bestAsk.toFixed(3)} limit=${priceLimit.toFixed(3)} (gamma quote ${quotePrice.toFixed(3)} + book slippage ${cfg.entryBookSlippage})`
@@ -654,6 +719,7 @@ async function loop() {
                     balanceUsdcAtEntry
                   })
                 );
+              }
               }
             }
           }

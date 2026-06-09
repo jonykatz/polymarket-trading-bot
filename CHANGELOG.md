@@ -6,6 +6,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+- Added: Entry spread guard (`ENTRY_BOOK_MAX_SPREAD`), partial-fill sell retries via `updatePosition`, and `EXIT_SKIP` webhook when the bid book is empty (`main.ts`, `positionStore.ts`, `sheetsEvent.ts`, `config.ts`).
 - Changed: Live FAK sells use CLOB best-bid pricing with `EXIT_BOOK_SLIPPAGE` / `EXIT_BOOK_SLIPPAGE_URGENT`, skip when the bid book is empty, and log thin-book depth warnings (`orderExecution.ts`, `paperTrader.ts`, `main.ts`, `config.ts`).
 - Changed: Live FAK buys use CLOB best-ask pricing with `ENTRY_BOOK_SLIPPAGE` (default 0.02) and skip when the token book has no asks (`orderExecution.ts`, `paperTrader.ts`, `main.ts`, `config.ts`).
 - Fixed: Live entry logs `OPEN` only after a successful FAK buy, caps at two FAK attempts per market, and reads Gamma resolution without inventing `exitReal=0.50` (`main.ts`, `polymarket.ts`, `sheetsEvent.ts`).

@@ -21,6 +21,7 @@ export const cfg = {
   confidenceThreshold: Number(process.env.CONFIDENCE_THRESHOLD ?? 0.8),
   entrySlippage: Number(process.env.ENTRY_SLIPPAGE ?? 0.05),
   entryBookSlippage: Number(process.env.ENTRY_BOOK_SLIPPAGE ?? 0.02),
+  entryBookMaxSpread: Number(process.env.ENTRY_BOOK_MAX_SPREAD ?? 0.08),
   exitBookSlippage: Number(process.env.EXIT_BOOK_SLIPPAGE ?? 0.02),
   exitBookSlippageUrgent: Number(process.env.EXIT_BOOK_SLIPPAGE_URGENT ?? 0.05),
   forceExitSeconds: Number(process.env.FORCE_EXIT_SECONDS ?? 3),

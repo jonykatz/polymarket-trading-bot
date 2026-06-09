@@ -67,6 +67,19 @@ export function removePosition(marketId: string, filePath?: string): void {
   savePositions(positions, target);
 }
 
+export function updatePosition(
+  marketId: string,
+  patch: Partial<LivePosition>,
+  filePath?: string
+): void {
+  const target = resolvePositionsPath(filePath);
+  const positions = loadPositions(target);
+  const idx = positions.findIndex((p) => p.marketId === marketId);
+  if (idx < 0) return;
+  positions[idx] = { ...positions[idx], ...patch };
+  savePositions(positions, target);
+}
+
 export function getPositionsDueToClose(
   closeAfterSeconds: number,
   filePath?: string

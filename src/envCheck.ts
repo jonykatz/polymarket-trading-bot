@@ -102,6 +102,9 @@ export function validateBotEnv(): void {
   if (!Number.isFinite(cfg.entryBookSlippage) || cfg.entryBookSlippage < 0 || cfg.entryBookSlippage > 0.5) {
     errors.push(`ENTRY_BOOK_SLIPPAGE must be in [0, 0.5] (got ${cfg.entryBookSlippage}).`);
   }
+  if (!Number.isFinite(cfg.entryBookMaxSpread) || cfg.entryBookMaxSpread < 0 || cfg.entryBookMaxSpread > 0.5) {
+    errors.push(`ENTRY_BOOK_MAX_SPREAD must be in [0, 0.5] (got ${cfg.entryBookMaxSpread}).`);
+  }
   if (!Number.isFinite(cfg.exitBookSlippage) || cfg.exitBookSlippage < 0 || cfg.exitBookSlippage > 0.5) {
     errors.push(`EXIT_BOOK_SLIPPAGE must be in [0, 0.5] (got ${cfg.exitBookSlippage}).`);
   }
