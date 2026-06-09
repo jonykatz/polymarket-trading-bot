@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+- Added: Live close webhook via `src/engine/liveTrader.ts` and shared `src/engine/tradeWebhook.ts`; `src/connectors/orderExecution.ts` parses CLOB fill prices/fees; `LivePosition` stores entry metadata for close payloads (`executionStatus: EXECUTED`).
+- Added: `src/engine/paperTrader.ts` close webhook fields `entryPriceReal`, `exitPriceReal`, slippage, fees, `pnlGross`/`pnlNet`, `btcScore`, `btcSnapshotStale`, and `executionStatus` (paper mode uses zeros and `TESTING`).
 - Added: `src/connectors/binance.ts` 60s BTC snapshot cache with stale fallback on REST failures (429); `src/engine/features.ts` and `src/engine/predictor.ts` expose `btc=STALE` in logs when using cached data (`BINANCE_SNAPSHOT_TTL_SEC`).
 - Added: `src/connectors/binance.ts` and `npm run binance:verify`; `src/engine/features.ts` and `src/engine/predictor.ts` blend BTC momentum (`btcScore`) into signals (`BINANCE_FEATURES_ENABLED=false` to disable).
 - Fixed: `src/main.ts` in `PAPER_MODE` now enforces `CONFIDENCE_THRESHOLD` before calling `paperTrader.onPrediction()`, preventing entries when confidence is below threshold.

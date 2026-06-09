@@ -190,7 +190,77 @@ export type PlaceOrderResult = {
   orderID?: string;
   status?: string;
   errorMsg?: string;
+  fillPrice?: number;
+  fillUsd?: number;
+  fillShares?: number;
+  feeRateBps?: number;
 };
+
+type OrderAmounts = {
+  takingAmount?: string;
+  makingAmount?: string;
+};
+
+function parseNum(v: string | undefined): number {
+  const n = parseFloat(v ?? "0");
+  return Number.isFinite(n) ? n : 0;
+}
+
+function parseOrderFill(
+  side: "BUY" | "SELL",
+  amounts: OrderAmounts,
+  priceFallback: number,
+  sizeFallback: number
+): Pick<PlaceOrderResult, "fillPrice" | "fillUsd" | "fillShares"> {
+  const making = parseNum(amounts.makingAmount);
+  const taking = parseNum(amounts.takingAmount);
+
+  if (side === "BUY" && making > 0 && taking > 0) {
+    return { fillPrice: making / taking, fillUsd: making, fillShares: taking };
+  }
+  if (side === "SELL" && making > 0 && taking > 0) {
+    return { fillPrice: taking / making, fillUsd: taking, fillShares: making };
+  }
+
+  if (priceFallback <= 0) {
+    return { fillPrice: 0, fillUsd: 0, fillShares: 0 };
+  }
+  if (side === "BUY") {
+    const shares = sizeFallback / priceFallback;
+    return { fillPrice: priceFallback, fillUsd: sizeFallback, fillShares: shares };
+  }
+  return {
+    fillPrice: priceFallback,
+    fillUsd: sizeFallback * priceFallback,
+    fillShares: sizeFallback
+  };
+}
+
+async function enrichOrderResult(
+  client: ClobClient,
+  tokenId: string,
+  side: "BUY" | "SELL",
+  priceFallback: number,
+  sizeFallback: number,
+  raw: OrderAmounts & { success?: boolean; orderID?: string; status?: string; errorMsg?: string }
+): Promise<PlaceOrderResult> {
+  let feeRateBps = 0;
+  try {
+    feeRateBps = await client.getFeeRateBps(tokenId);
+  } catch {
+    feeRateBps = 0;
+  }
+
+  const fill = parseOrderFill(side, raw, priceFallback, sizeFallback);
+  return {
+    success: raw.success ?? true,
+    orderID: raw.orderID,
+    status: raw.status,
+    errorMsg: raw.errorMsg,
+    ...fill,
+    feeRateBps
+  };
+}
 
 function simulatedPaperOrder(params: PlaceOrderParams): PlaceOrderResult {
   const { tokenId, side, size, price, orderType = "GTC" } = params;
@@ -217,11 +287,7 @@ export async function placeOrder(params: PlaceOrderParams): Promise<PlaceOrderRe
         undefined,
         OrderType.GTC
       );
-      return {
-        success: res.success ?? true,
-        orderID: res.orderID,
-        status: res.status
-      };
+      return enrichOrderResult(client, tokenId, side, price, size, res);
     }
     const marketType = orderType === "FAK" ? OrderType.FAK : OrderType.FOK;
     const marketOrder = await client.createAndPostMarketOrder(
@@ -235,11 +301,7 @@ export async function placeOrder(params: PlaceOrderParams): Promise<PlaceOrderRe
       undefined,
       marketType
     );
-    return {
-      success: marketOrder.success ?? true,
-      orderID: marketOrder.orderID,
-      status: marketOrder.status
-    };
+    return enrichOrderResult(client, tokenId, side, price, size, marketOrder);
   } catch (e: unknown) {
     const err = e as Error;
     return {

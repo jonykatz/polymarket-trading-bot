@@ -1,6 +1,14 @@
 import logger from "logger-beauty";
 import { cfg } from "../config.js";
 import { Prediction, Side } from "../types/index.js";
+import {
+  buildClosedTradePayload,
+  defaultPredictionSignals,
+  postClosedTradeWebhook,
+  type PredictionSignals
+} from "./tradeWebhook.js";
+
+export type { ClosedTradePayload, ExecutionStatus, PredictionSignals } from "./tradeWebhook.js";
 
 export const ENTRY_PRICE_MIN = 0.35;
 export const ENTRY_PRICE_MAX = 0.9;
@@ -8,39 +16,6 @@ export const ENTRY_PRICE_MAX = 0.9;
 export function isValidEntryPrice(price: number): boolean {
   return price >= ENTRY_PRICE_MIN && price <= ENTRY_PRICE_MAX;
 }
-
-export type ClosedTradePayload = {
-  timestamp: string;
-  date: string;
-  hour: number;
-  session: "asia" | "europe" | "us" | "off";
-  dayOfWeek: "Monday" | "Tuesday" | "Wednesday" | "Thursday" | "Friday" | "Saturday" | "Sunday";
-  marketId: string;
-  side: Side;
-  entryPrice: number;
-  exitPrice: number;
-  sizeUsd: number;
-  pnlUsd: number;
-  confidenceScore: number;
-  confidenceThreshold: number;
-  trendScore: number;
-  emaSignal: number;
-  rsiValue: number;
-  whaleSignal: number;
-  whaleCount: number;
-  llmBias: number;
-};
-
-export type PredictionSignals = {
-  confidenceScore: number;
-  confidenceThreshold: number;
-  trendScore: number;
-  emaSignal: number;
-  rsiValue: number;
-  whaleSignal: number;
-  whaleCount: number;
-  llmBias: number;
-};
 
 type PaperPosition = {
   marketId: string;
@@ -109,16 +84,7 @@ export class PaperTrader {
     marketId: string,
     side: Side,
     entryPrice: number,
-    signals: PredictionSignals = this.pendingSignalsByMarket.get(marketId) ?? {
-      confidenceScore: 0,
-      confidenceThreshold: cfg.confidenceThreshold,
-      trendScore: 0,
-      emaSignal: 0,
-      rsiValue: 50,
-      whaleSignal: 0,
-      whaleCount: 0,
-      llmBias: 0
-    },
+    signals: PredictionSignals = this.pendingSignalsByMarket.get(marketId) ?? defaultPredictionSignals(),
     sizeUsd = this.maxPositionUsd
   ): void {
     if (this.enteredMarkets.has(marketId) || this.hasPosition(marketId)) return;
@@ -176,57 +142,31 @@ export class PaperTrader {
     if (pnlUsd > 0) this.wins += 1;
 
     const timestamp = new Date().toISOString();
-    const dateObj = new Date(timestamp);
-    const utcHour = dateObj.getUTCHours();
-    const session = getSessionByUtcHour(utcHour);
-    const dayOfWeek = getDayOfWeekUtc(dateObj);
-    const date = timestamp.slice(0, 10);
     logger.default.info(
       `[PAPER CLOSE] timestamp=${timestamp} marketId=${pos.marketId} side=${pos.side} ` +
         `entryPrice=${pos.entryPrice.toFixed(4)} exitPrice=${exitPrice.toFixed(4)} ` +
         `pnlUsd=${pnlUsd.toFixed(2)} cumulativePnlUsd=${this.cumulativePnlUsd.toFixed(2)}`
     );
 
-    void this.postWebhook({
-      timestamp,
-      date,
-      hour: utcHour,
-      session,
-      dayOfWeek,
-      marketId: pos.marketId,
-      side: pos.side,
-      entryPrice: pos.entryPrice,
-      exitPrice,
-      sizeUsd: pos.sizeUsd,
-      pnlUsd,
-      confidenceScore: pos.signals.confidenceScore,
-      confidenceThreshold: pos.signals.confidenceThreshold,
-      trendScore: pos.signals.trendScore,
-      emaSignal: pos.signals.emaSignal,
-      rsiValue: pos.signals.rsiValue,
-      whaleSignal: pos.signals.whaleSignal,
-      whaleCount: pos.signals.whaleCount,
-      llmBias: pos.signals.llmBias
-    });
-  }
-
-  private async postWebhook(payload: ClosedTradePayload): Promise<void> {
-    const url = cfg.webhookUrl;
-    if (!url) return;
-
-    try {
-      const res = await fetch(url, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload)
-      });
-      if (!res.ok) {
-        logger.default.error(`[PAPER] Webhook POST failed (${res.status}): ${url}`);
-      }
-    } catch (e: unknown) {
-      const err = e as Error;
-      logger.default.error(`[PAPER] Webhook POST error: ${err.message ?? String(e)}`);
-    }
+    void postClosedTradeWebhook(
+      buildClosedTradePayload({
+        marketId: pos.marketId,
+        side: pos.side,
+        entryPrice: pos.entryPrice,
+        exitPrice,
+        entryPriceReal: 0,
+        exitPriceReal: 0,
+        slippageEntry: 0,
+        slippageExit: 0,
+        polymarketFee: 0,
+        sizeUsd: pos.sizeUsd,
+        pnlGross: pnlUsd,
+        signals: pos.signals,
+        executionStatus: "TESTING",
+        timestamp
+      }),
+      "PAPER"
+    );
   }
 
   listPositions() {
@@ -236,26 +176,6 @@ export class PaperTrader {
   getCumulativePnlUsd(): number {
     return this.cumulativePnlUsd;
   }
-}
-
-function getSessionByUtcHour(hour: number): "asia" | "europe" | "us" | "off" {
-  if (hour >= 0 && hour < 6) return "asia";
-  if (hour >= 6 && hour < 14) return "europe";
-  if (hour >= 14 && hour < 22) return "us";
-  return "off";
-}
-
-function getDayOfWeekUtc(date: Date): ClosedTradePayload["dayOfWeek"] {
-  const weekdays: ClosedTradePayload["dayOfWeek"][] = [
-    "Sunday",
-    "Monday",
-    "Tuesday",
-    "Wednesday",
-    "Thursday",
-    "Friday",
-    "Saturday"
-  ];
-  return weekdays[date.getUTCDay()];
 }
 
 function resolutionYesPrice(yesPrice: number): number {

@@ -1,5 +1,9 @@
 export type Side = "YES" | "NO";
 
+import type { PredictionSignals } from "../engine/tradeWebhook.js";
+
+export type { PredictionSignals };
+
 export interface MarketTick {
   marketId: string;
   yesPrice: number;
@@ -82,4 +86,16 @@ export interface LivePosition {
   tokenId: string;
   sizeShares: number;
   openedAt: number;
+  /** Quoted/limit price at entry. */
+  entryPrice?: number;
+  /** Actual fill price from the CLOB buy. */
+  entryPriceReal?: number;
+  sizeUsd?: number;
+  slippageEntry?: number;
+  /** Fee rate in bps captured at entry. */
+  feeRateBps?: number;
+  /** Entry-side fee already paid (USD). */
+  entryFeeUsd?: number;
+  /** Predictor signals at entry for close webhook. */
+  signals?: PredictionSignals;
 }

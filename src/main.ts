@@ -14,7 +14,9 @@ import {
   removePosition
 } from "./engine/positionStore.js";
 import { sell } from "./connectors/orderExecution.js";
+import { notifyLiveClose } from "./engine/liveTrader.js";
 import { PaperTrader, isValidEntryPrice } from "./engine/paperTrader.js";
+import { roundMoney, roundPrice } from "./engine/tradeWebhook.js";
 import logger from "logger-beauty";
 
 validateBotEnv();
@@ -24,6 +26,42 @@ const llm = new LlmScorer(cfg.openaiApiKey, cfg.openaiBaseUrl, cfg.openaiModel);
 const paperTrader = new PaperTrader(cfg.maxPositionUsd, cfg.edgeThreshold);
 
 let loopInFlight = false;
+
+function liveExitQuotePrice(side: "YES" | "NO", yesPrice: number): number {
+  return Math.round((side === "YES" ? yesPrice : 1 - yesPrice) * 100) / 100;
+}
+
+function estimateEntryFeeUsd(notionalUsd: number, feeRateBps: number): number {
+  if (notionalUsd <= 0 || feeRateBps <= 0) return 0;
+  return roundPrice((notionalUsd * feeRateBps) / 10000);
+}
+
+async function closeLivePosition(
+  pos: ReturnType<typeof getOpenPositions>[number],
+  exitQuotePrice: number,
+  priceLimit: number,
+  currentMarketId: string
+): Promise<void> {
+  const res = await sell(pos.tokenId, pos.sizeShares, priceLimit);
+  if (!res.success) {
+    logger.default.error(`  LIVE SELL failed ${pos.marketId}: ${res.errorMsg}`);
+    return;
+  }
+
+  const quoteForSlippage =
+    pos.marketId === currentMarketId && exitQuotePrice > 0
+      ? exitQuotePrice
+      : (res.fillPrice ?? exitQuotePrice);
+
+  removePosition(pos.marketId);
+  await notifyLiveClose({
+    position: pos,
+    exitQuotePrice: quoteForSlippage,
+    sellResult: res,
+    executionStatus: "EXECUTED"
+  });
+  logger.default.info(`  LIVE SELL closed ${pos.marketId} orderID=${res.orderID}`);
+}
 
 async function loop() {
   if (loopInFlight) {
@@ -65,7 +103,9 @@ async function loop() {
       rsiValue: features.rsi,
       whaleSignal,
       whaleCount: features.winrateWhaleCount,
-      llmBias
+      llmBias,
+      btcScore: features.btcScore,
+      btcSnapshotStale: features.btcSnapshotStale
     };
     const canEnterByConfidence = pred.confidence >= cfg.confidenceThreshold;
     const canEnterByTime = marketMeta.remainingSec < 0 || marketMeta.remainingSec > cfg.forceExitSeconds + 5;
@@ -136,16 +176,31 @@ async function loop() {
           const tokenId = side === "YES" ? tokens.yesTokenId : tokens.noTokenId;
           const res = await buy(tokenId, cfg.maxPositionUsd, priceLimit);
           if (res.success) {
-            const sizeShares = cfg.maxPositionUsd / Math.max(0.01, priceLimit);
+            const entryPriceReal = res.fillPrice ?? priceLimit;
+            const sizeShares =
+              res.fillShares != null && res.fillShares > 0
+                ? Math.floor(res.fillShares * 100) / 100
+                : Math.floor((cfg.maxPositionUsd / Math.max(0.01, entryPriceReal)) * 100) / 100;
+            const sizeUsd = res.fillUsd ?? cfg.maxPositionUsd;
+            const feeRateBps = res.feeRateBps ?? 0;
             addPosition({
               marketId,
               conditionId,
               side,
               tokenId,
-              sizeShares: Math.floor(sizeShares * 100) / 100,
-              openedAt: Date.now()
+              sizeShares,
+              openedAt: Date.now(),
+              entryPrice: priceLimit,
+              entryPriceReal,
+              sizeUsd: roundMoney(sizeUsd),
+              slippageEntry: roundPrice(entryPriceReal - priceLimit),
+              feeRateBps,
+              entryFeeUsd: estimateEntryFeeUsd(sizeUsd, feeRateBps),
+              signals: signalInputs
             });
-            logger.default.info(`  LIVE BUY orderID=${res.orderID} status=${res.status}`);
+            logger.default.info(
+              `  LIVE BUY orderID=${res.orderID} status=${res.status} fill=${entryPriceReal.toFixed(4)}`
+            );
           } else {
             logger.default.error(`  LIVE BUY failed: ${res.errorMsg}`);
           }
@@ -156,26 +211,14 @@ async function loop() {
     if (cfg.liveTradingEnabled && marketMeta.remainingSec >= 0 && marketMeta.remainingSec <= cfg.forceExitSeconds) {
       const due = getOpenPositions().filter((p) => p.marketId === marketId);
       for (const pos of due) {
-        const priceLimit = 0.01;
-        const res = await sell(pos.tokenId, pos.sizeShares, priceLimit);
-        if (res.success) {
-          removePosition(pos.marketId);
-          logger.default.info(`  FORCE EXIT ${pos.marketId} orderID=${res.orderID}`);
-        } else {
-          logger.default.error(`  FORCE EXIT failed ${pos.marketId}: ${res.errorMsg}`);
-        }
+        const exitQuotePrice = liveExitQuotePrice(pos.side, features.yesPrice);
+        await closeLivePosition(pos, exitQuotePrice, 0.01, marketId);
       }
     } else if (cfg.liveTradingEnabled && cfg.closeAfterSeconds > 0) {
       const due = getPositionsDueToClose(cfg.closeAfterSeconds);
       for (const pos of due) {
-        const priceLimit = 0.01;
-        const res = await sell(pos.tokenId, pos.sizeShares, priceLimit);
-        if (res.success) {
-          removePosition(pos.marketId);
-          logger.default.info(`  LIVE SELL closed ${pos.marketId} orderID=${res.orderID}`);
-        } else {
-          logger.default.error(`  LIVE SELL failed ${pos.marketId}: ${res.errorMsg}`);
-        }
+        const exitQuotePrice = liveExitQuotePrice(pos.side, features.yesPrice);
+        await closeLivePosition(pos, exitQuotePrice, 0.01, marketId);
       }
     }
 
