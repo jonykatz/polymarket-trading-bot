@@ -22,7 +22,11 @@ export type SheetsRecordType =
   | "ENTRY_FAK_FAILED"
   | "NO_TRADE";
 
-export type SkipReason = "PRICE_OUT_OF_RANGE" | "ALREADY_IN_POSITION" | "NEAR_EXPIRY";
+export type SkipReason =
+  | "PRICE_OUT_OF_RANGE"
+  | "ALREADY_IN_POSITION"
+  | "NEAR_EXPIRY"
+  | "MAX_ENTRY_ATTEMPTS";
 
 export type TradeEventContext = {
   mode: BotMode;

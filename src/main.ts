@@ -47,6 +47,7 @@ let singleTradeMarketId: string | null = null;
 let shuttingDown = false;
 const postedSheetEventKeys = new Set<string>();
 const fakFailCountByMarket = new Map<string, number>();
+const MAX_FAK_BUY_ATTEMPTS = 2;
 
 function botMode(): BotMode {
   if (singleTradeMode) return "single-trade";
@@ -343,9 +344,15 @@ async function loop() {
     if (canEnterByConfidence && canEnterByTime) {
       const entryPrice =
         Math.round((side === "YES" ? features.yesPrice : 1 - features.yesPrice) * 100) / 100;
-      action =
-        `OPEN ${side} sizeUsd=$${cfg.maxPositionUsd} @ ${entryPrice.toFixed(3)} | ` +
-        `conf=${pred.confidence.toFixed(2)} ${pred.reason}`;
+      if (liveActive && !singleTradeEntered) {
+        action =
+          `SIGNAL | ${side} entry candidate @ ${entryPrice.toFixed(3)} | ` +
+          `conf=${pred.confidence.toFixed(2)} ${pred.reason}`;
+      } else {
+        action =
+          `OPEN ${side} sizeUsd=$${cfg.maxPositionUsd} @ ${entryPrice.toFixed(3)} | ` +
+          `conf=${pred.confidence.toFixed(2)} ${pred.reason}`;
+      }
     } else if (!canEnterByConfidence) {
       action = `HOLD | low confidence (${pred.confidence.toFixed(2)} < ${cfg.confidenceThreshold.toFixed(2)})`;
     } else if (!canEnterByTime) {
@@ -415,15 +422,29 @@ async function loop() {
     }
 
     const canOpenLive =
-      liveActive &&
-      !singleTradeEntered &&
-      (action.startsWith("OPEN YES") || action.startsWith("OPEN NO"));
+      liveActive && !singleTradeEntered && canEnterByConfidence && canEnterByTime;
 
     if (canOpenLive) {
       const conditionId = connector.getConditionId();
       const quotePrice =
         Math.round((side === "YES" ? features.yesPrice : 1 - features.yesPrice) * 100) / 100;
-      if (!isValidEntryPrice(quotePrice)) {
+      const priorFakFails = fakFailCountByMarket.get(marketId) ?? 0;
+      if (priorFakFails >= MAX_FAK_BUY_ATTEMPTS) {
+        action = `SKIP | max FAK buy attempts (${MAX_FAK_BUY_ATTEMPTS}) for ${marketId}`;
+        logger.default.info(`  SKIP | max FAK buy attempts (${MAX_FAK_BUY_ATTEMPTS}) for ${marketId}`);
+        await emitSheetsEventOnce(
+          `${marketId}:MAX_ENTRY_ATTEMPTS`,
+          buildSheetsSkipEvent({
+            recordType: "SIGNAL_SKIP",
+            skipReason: "MAX_ENTRY_ATTEMPTS",
+            marketId,
+            side,
+            quotePrice,
+            signals: signalInputs,
+            ctx: eventContext
+          })
+        );
+      } else if (!isValidEntryPrice(quotePrice)) {
         logger.default.info(
           `  SKIP | entry price ${quotePrice.toFixed(3)} outside valid range (live ${marketId})`
         );
@@ -507,17 +528,21 @@ async function loop() {
               singleTradeMarketId = marketId;
               logger.default.info(`  SINGLE-TRADE entered ${marketId}; waiting for market close…`);
             }
+            action =
+              `OPEN ${side} sizeUsd=$${cfg.maxPositionUsd} @ ${quotePrice.toFixed(3)} | ` +
+              `conf=${pred.confidence.toFixed(2)} ${pred.reason}`;
             logger.default.info(
               `  LIVE BUY orderID=${res.orderID} status=${res.status} fill=${entryPriceReal.toFixed(4)}`
             );
           } else {
-            const failCount = (fakFailCountByMarket.get(marketId) ?? 0) + 1;
+            const failCount = priorFakFails + 1;
             fakFailCountByMarket.set(marketId, failCount);
+            action = `SKIP | FAK buy failed (${failCount}/${MAX_FAK_BUY_ATTEMPTS}) ${marketId}`;
             logger.default.error(
               `  LIVE BUY failed: ${res.errorMsg ?? "unknown"} status=${res.status ?? "?"}`
             );
             await emitSheetsEventOnce(
-              `${marketId}:ENTRY_FAK_FAILED`,
+              `${marketId}:ENTRY_FAK_FAILED:${failCount}`,
               buildSheetsFakFailEvent({
                 marketId,
                 side,

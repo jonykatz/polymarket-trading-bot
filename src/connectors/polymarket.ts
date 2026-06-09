@@ -8,6 +8,8 @@ type GammaMarket = {
   endDate?: string;
   closed?: boolean;
   active?: boolean;
+  resolved?: boolean;
+  umaResolutionStatus?: string;
   lastTradePrice?: number;
   bestBid?: number;
   bestAsk?: number;
@@ -15,6 +17,12 @@ type GammaMarket = {
   outcomePrices?: string;
   condition_id?: string;
   conditionId?: string;
+};
+
+export type MarketResolution = {
+  closed: boolean;
+  /** 0 or 1 when Gamma shows a clear winner; null when closed but not yet resolved. */
+  resolvedYesPrice: number | null;
 };
 
 type DataTrade = {
@@ -116,30 +124,38 @@ export class PolymarketConnector {
   }
 
   /** Fetch a market by slug (works for closed / resolved 5m windows). */
-  async getMarketResolution(slug: string): Promise<{
-    closed: boolean;
-    resolvedYesPrice: number | null;
-  } | null> {
+  async getMarketResolution(slug: string): Promise<MarketResolution | null> {
     try {
       const arr = await this.fetchJson<GammaMarket[]>(
         `${this.baseUrl}/markets?slug=${encodeURIComponent(slug)}`
       );
       if (!arr.length) return null;
       const m = arr[0];
-      const closed = Boolean(m.closed);
+      const closed = Boolean(m.closed) || Boolean(m.resolved);
       if (!closed) return { closed: false, resolvedYesPrice: null };
+
+      const umaStatus = `${m.umaResolutionStatus ?? ""}`.toLowerCase();
+      if (umaStatus.includes("disputed") || umaStatus.includes("proposed")) {
+        return { closed: true, resolvedYesPrice: null };
+      }
 
       const outcomes = parseJsonArray(m.outcomes);
       const prices = parseJsonArray(m.outcomePrices).map(Number);
       if (outcomes.length >= 2 && outcomes.length === prices.length) {
-        const yesIdx = outcomes.findIndex(
-          (o) => `${o}`.toLowerCase() === "up" || `${o}`.toLowerCase() === "yes"
-        );
-        if (yesIdx >= 0 && Number.isFinite(prices[yesIdx])) {
-          const yesP = prices[yesIdx];
-          if (yesP >= 0.99) return { closed: true, resolvedYesPrice: 1 };
-          if (yesP <= 0.01) return { closed: true, resolvedYesPrice: 0 };
-          return { closed: true, resolvedYesPrice: yesP >= 0.5 ? 1 : 0 };
+        const yesIdx = outcomes.findIndex((o) => isYesOutcome(`${o}`));
+        const noIdx = outcomes.findIndex((o) => isNoOutcome(`${o}`));
+
+        if (yesIdx >= 0 && Number.isFinite(prices[yesIdx]) && prices[yesIdx] >= 0.99) {
+          return { closed: true, resolvedYesPrice: 1 };
+        }
+        if (noIdx >= 0 && Number.isFinite(prices[noIdx]) && prices[noIdx] >= 0.99) {
+          return { closed: true, resolvedYesPrice: 0 };
+        }
+        if (yesIdx >= 0 && Number.isFinite(prices[yesIdx]) && prices[yesIdx] <= 0.01) {
+          return { closed: true, resolvedYesPrice: 0 };
+        }
+        if (noIdx >= 0 && Number.isFinite(prices[noIdx]) && prices[noIdx] <= 0.01) {
+          return { closed: true, resolvedYesPrice: 1 };
         }
       }
 
@@ -281,6 +297,16 @@ function parse5mStartFromSlug(slug: string): number | null {
   if (!m) return null;
   const n = Number(m[1]);
   return Number.isFinite(n) ? n : null;
+}
+
+function isYesOutcome(label: string): boolean {
+  const o = label.toLowerCase();
+  return o === "up" || o === "yes";
+}
+
+function isNoOutcome(label: string): boolean {
+  const o = label.toLowerCase();
+  return o === "down" || o === "no";
 }
 
 function clamp01(v: number) {

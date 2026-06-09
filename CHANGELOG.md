@@ -6,6 +6,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+- Fixed: Live entry logs `OPEN` only after a successful FAK buy, caps at two FAK attempts per market, and reads Gamma resolution without inventing `exitReal=0.50` (`main.ts`, `polymarket.ts`, `sheetsEvent.ts`).
 - Fixed: Live exits use FAK sells, proactive Gamma settlement before SELL, plausible-balance fee math in `tradeWebhook.ts`, and settlement webhooks with `exitStatus=SETTLED` (`orderExecution.ts`, `main.ts`, `liveTrader.ts`, `sheetsEvent.ts`).
 - Fixed: `src/main.ts` live mode closes or settles positions when the 5m market rolls (stale `open-positions.json` entries) and widens force-exit to `FORCE_EXIT_SECONDS + LOOP_SECONDS` so 15s ticks still emit `TRADE_CLOSED_*` webhooks before expiry.
 - Added: `ecosystem.config.cjs` and `npm run pm2:start|stop|logs|restart` for live 24/7 on a local Mac without keeping Terminal open (`pm2` devDependency).
