@@ -77,6 +77,18 @@ npm run dev
 
 Or after a build: `npm run build && npm start` (runs `dist/main.js`).
 
+**Live 24/7 on your Mac (pm2)** — keeps the bot running after you close Terminal; restart on crash. Requires Mac plugged in and sleep disabled. Pause Railway first so only one instance runs.
+
+```bash
+npm install
+npm run pm2:start    # build + start in background
+npm run pm2:logs     # tail logs
+npm run pm2:stop     # stop
+npm run pm2:restart  # rebuild + restart after code changes
+```
+
+Logs also go to `logs/pm2-out.log` and `logs/pm2-error.log`. Optional: `npx pm2 startup` then follow its `sudo` hint so pm2 survives reboot.
+
 The bot places real orders when confidence and timing gates pass. It logs `LIVE BUY orderID=...`, records positions in `open-positions.json`, and force-closes near expiry (default 3s before settlement).
 
 ### 3. 📊 (Optional) Run the Compare UI
