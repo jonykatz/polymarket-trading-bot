@@ -145,9 +145,48 @@ async function resolveLiveSellPricing(
   };
 }
 
+const POST_BUY_BALANCE_DELAY_MS = 1000;
+
+function sleepMs(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 function estimateEntryFeeUsd(notionalUsd: number, feeRateBps: number): number {
   if (notionalUsd <= 0 || feeRateBps <= 0) return 0;
   return roundPrice((notionalUsd * feeRateBps) / 10000);
+}
+
+function resolveRealEntryCosts(input: {
+  balanceUsdcAtEntry?: number;
+  balanceUsdcPostBuy?: number;
+  sizeUsd: number;
+  sizeShares: number;
+  clobEntryPriceReal: number;
+  feeRateBps: number;
+}): {
+  entryPriceReal: number;
+  entryFeeUsd: number;
+  entryCashOutUsd?: number;
+} {
+  const { balanceUsdcAtEntry, balanceUsdcPostBuy, sizeUsd, sizeShares, clobEntryPriceReal, feeRateBps } =
+    input;
+
+  if (
+    balanceUsdcAtEntry != null &&
+    balanceUsdcPostBuy != null &&
+    balanceUsdcAtEntry > balanceUsdcPostBuy &&
+    sizeShares > 0
+  ) {
+    const entryCashOutUsd = roundMoney(balanceUsdcAtEntry - balanceUsdcPostBuy);
+    const entryFeeUsd = roundMoney(Math.max(0, entryCashOutUsd - sizeUsd));
+    const entryPriceReal = roundPrice(entryCashOutUsd / sizeShares);
+    return { entryPriceReal, entryFeeUsd, entryCashOutUsd };
+  }
+
+  return {
+    entryPriceReal: clobEntryPriceReal,
+    entryFeeUsd: estimateEntryFeeUsd(sizeUsd, feeRateBps)
+  };
 }
 
 type LiveEntryFill = {
@@ -706,13 +745,35 @@ async function loop() {
                     `  LIVE BUY succeeded but CLOB returned no fillShares/fillUsd for ${marketId}`
                   );
                 } else {
-                  const { sizeShares, sizeUsd, entryPriceReal, expectedShares } = fill;
+                  const { sizeShares, sizeUsd, entryPriceReal: clobEntryPriceReal, expectedShares } =
+                    fill;
                   if (sizeShares + PARTIAL_FILL_EPS_SHARES < expectedShares) {
                     logger.default.warn(
                       `  LIVE BUY partial fill: got ${sizeShares}/${expectedShares} shares`
                     );
                   }
                   const feeRateBps = res.feeRateBps ?? 0;
+
+                  let balanceUsdcPostBuy: number | undefined;
+                  await sleepMs(POST_BUY_BALANCE_DELAY_MS);
+                  try {
+                    balanceUsdcPostBuy = (await getAccountBalance()).balanceUsdc;
+                  } catch (e: unknown) {
+                    const err = e as Error;
+                    logger.default.warn(
+                      `  balance after buy unavailable: ${err.message ?? String(e)}`
+                    );
+                  }
+
+                  const entryCosts = resolveRealEntryCosts({
+                    balanceUsdcAtEntry,
+                    balanceUsdcPostBuy,
+                    sizeUsd,
+                    sizeShares,
+                    clobEntryPriceReal,
+                    feeRateBps
+                  });
+
                   addPosition({
                     marketId,
                     conditionId,
@@ -721,16 +782,17 @@ async function loop() {
                     sizeShares,
                     openedAt: Date.now(),
                     entryPrice: quotePrice,
-                    entryPriceReal,
+                    entryPriceReal: entryCosts.entryPriceReal,
                     entryPriceLimit: priceLimit,
                     entryOrderId: res.orderID,
                     entryStatus: res.status,
                     entryAttemptCount: 1,
                     pUp5mAtEntry: pred.pUp5m,
                     sizeUsd,
-                    slippageEntry: roundPrice(entryPriceReal - quotePrice),
+                    slippageEntry: roundPrice(clobEntryPriceReal - quotePrice),
                     feeRateBps,
-                    entryFeeUsd: estimateEntryFeeUsd(sizeUsd, feeRateBps),
+                    entryFeeUsd: entryCosts.entryFeeUsd,
+                    entryCashOutUsd: entryCosts.entryCashOutUsd,
                     balanceUsdcAtEntry,
                     signals: signalInputs
                   });
@@ -743,8 +805,9 @@ async function loop() {
                     `OPEN ${side} sizeUsd=$${sizeUsd.toFixed(2)} @ ${quotePrice.toFixed(3)} | ` +
                     `conf=${pred.confidence.toFixed(2)} ${pred.reason}`;
                   logger.default.info(
-                    `  LIVE BUY orderID=${res.orderID} status=${res.status} fill=${entryPriceReal.toFixed(4)} ` +
-                      `shares=${sizeShares} usd=${sizeUsd.toFixed(2)}`
+                    `  LIVE BUY orderID=${res.orderID} status=${res.status} fill=${entryCosts.entryPriceReal.toFixed(4)} ` +
+                      `shares=${sizeShares} usd=${sizeUsd.toFixed(2)} ` +
+                      `cashOut=${entryCosts.entryCashOutUsd?.toFixed(2) ?? "?"} fee=${entryCosts.entryFeeUsd.toFixed(2)}`
                   );
                 }
               } else {

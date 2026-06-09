@@ -96,6 +96,8 @@ export interface LivePosition {
   feeRateBps?: number;
   /** Entry-side fee already paid (USD). */
   entryFeeUsd?: number;
+  /** Total USDC debited from wallet on entry (notional + fees). */
+  entryCashOutUsd?: number;
   /** CLOB USDC balance snapshot immediately before the buy. */
   balanceUsdcAtEntry?: number;
   entryPriceLimit?: number;

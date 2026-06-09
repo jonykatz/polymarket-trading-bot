@@ -155,9 +155,10 @@ function baseFromSignals(
 }
 
 function entryNotionalFromPosition(position: LivePosition): number {
+  if (position.sizeUsd != null && position.sizeUsd > 0) return roundMoney(position.sizeUsd);
   const real = position.entryPriceReal ?? position.entryPrice ?? 0;
   if (real > 0 && position.sizeShares > 0) return roundMoney(position.sizeShares * real);
-  return position.sizeUsd ?? cfg.maxPositionUsd;
+  return cfg.maxPositionUsd;
 }
 
 export function buildSheetsEventFromClose(
@@ -174,7 +175,8 @@ export function buildSheetsEventFromClose(
   const entryNotional = entryNotionalFromPosition(position);
   const entryFee = position.entryFeeUsd ?? null;
   const entryCashOut =
-    entryFee != null ? roundMoney(entryNotional + entryFee) : entryNotional;
+    position.entryCashOutUsd ??
+    (entryFee != null ? roundMoney(entryNotional + entryFee) : entryNotional);
   const walletDelta =
     closed.balanceUsdcAtEntry != null && closed.balanceUsdcAtExit != null
       ? roundMoney(closed.balanceUsdcAtExit - closed.balanceUsdcAtEntry)
