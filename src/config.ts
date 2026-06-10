@@ -50,5 +50,10 @@ export const cfg = {
     Boolean(process.env.PRIVATE_KEY?.trim()) && !envBool(process.env.PAPER_MODE, false),
   closeAfterSeconds: Number(process.env.CLOSE_AFTER_SECONDS ?? 0),
   /** Ms to wait after buy/sell/settle before reading CLOB USDC for fee/PnL snapshots. */
-  balanceSettleDelayMs: Number(process.env.BALANCE_SETTLE_DELAY_MS ?? 8000)
+  balanceSettleDelayMs: Number(process.env.BALANCE_SETTLE_DELAY_MS ?? 8000),
+  /** When true (default), live closes/skips enqueue to polymarket-reporter instead of blocking the trading loop. */
+  reportingAsync: envBool(process.env.REPORTING_ASYNC, true),
+  /** Reporter waits this long after a close before reading balance + posting to n8n. */
+  reportSettleDelayMs: Number(process.env.REPORT_SETTLE_DELAY_MS ?? 30000),
+  reporterLoopSeconds: Number(process.env.REPORTER_LOOP_SECONDS ?? 10)
 };

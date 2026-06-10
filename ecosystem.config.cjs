@@ -1,6 +1,6 @@
 const path = require("path");
 
-/** pm2: live bot 24/7 on your Mac — `npm run pm2:start` */
+/** pm2: live bot + async reporter — `npm run pm2:start` */
 module.exports = {
   apps: [
     {
@@ -14,6 +14,18 @@ module.exports = {
       time: true,
       out_file: path.join(__dirname, "logs/pm2-out.log"),
       error_file: path.join(__dirname, "logs/pm2-error.log")
+    },
+    {
+      name: "polymarket-reporter",
+      script: path.join(__dirname, "dist/reportingLoop.js"),
+      cwd: __dirname,
+      autorestart: true,
+      watch: false,
+      max_memory_restart: "256M",
+      merge_logs: true,
+      time: true,
+      out_file: path.join(__dirname, "logs/pm2-reporter-out.log"),
+      error_file: path.join(__dirname, "logs/pm2-reporter-error.log")
     }
   ]
 };

@@ -12,7 +12,7 @@ Cheat sheet para conectarte, revisar estado, logs y actualizar el bot cuando lo 
 | Usuario SSH | `root` |
 | Hostname | `polymarket-bot` |
 | Carpeta del bot | `/root/polymarket-trading-bot` |
-| Proceso PM2 | `polymarket-bot` |
+| Proceso PM2 | `polymarket-bot` + `polymarket-reporter` |
 
 ---
 
@@ -45,9 +45,10 @@ npm run pm2:status
 
 | `status` | Significado |
 |----------|-------------|
-| `online` | Todo bien |
+| `online` (ambos) | Todo bien — `polymarket-bot` tradea, `polymarket-reporter` manda a Sheets |
 | `stopped` | Parado — ver sección Reiniciar |
 | `errored` | Falló — ver Logs |
+| solo `polymarket-bot` online | Reporter caído — Sheets no recibe cierres; `pm2 restart ecosystem.config.cjs` |
 
 ---
 
@@ -95,11 +96,12 @@ Revisá Sheets cuando quieras ver actividad sin SSH.
 ```bash
 cd ~/polymarket-trading-bot
 
-npm run pm2:status    # ¿está vivo?
-npm run pm2:logs      # tail en vivo
-npm run pm2:stop      # parar bot
-npm run pm2:restart   # rebuild + reiniciar
+npm run pm2:status    # ¿están vivos bot + reporter?
+npm run pm2:logs      # tail en vivo (ambos procesos)
+npm run pm2:stop      # parar bot y reporter
+npm run pm2:restart   # rebuild + reiniciar ambos
 npm run pm2:deploy    # rebuild + reiniciar + logs
+tail -30 logs/pm2-reporter-out.log   # solo reporter → n8n/Sheets
 ```
 
 ---

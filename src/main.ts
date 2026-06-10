@@ -23,7 +23,14 @@ import {
   updatePosition
 } from "./engine/positionStore.js";
 import { sell } from "./connectors/orderExecution.js";
-import { finalizeLiveClose, finalizeLiveSettle, isSellErrorLikelySettled } from "./engine/liveTrader.js";
+import { finalizeLiveClose, finalizeLiveSettle, isSellErrorLikelySettled, buildLiveClosePayload, buildLiveSettlePayload } from "./engine/liveTrader.js";
+import { enqueueEvent } from "./engine/eventQueue.js";
+import { acquireInstanceLock, releaseInstanceLock } from "./engine/instanceLock.js";
+import {
+  isMarketPastWindowEnd,
+  settleRedeemCashInUsd,
+  shouldAssumeTotalLossAfterSettle
+} from "./engine/settleAssumptions.js";
 import {
   PaperTrader,
   bidDepthAtOrAbove,
@@ -79,12 +86,33 @@ function makeEventContext(
   return { mode: botMode(), remainingSec, yesPrice, pUp5m };
 }
 
+function useAsyncReporting(): boolean {
+  return liveActive && !singleTradeMode && cfg.reportingAsync;
+}
+
+function marketPastWindowEnd(marketId: string, bufferSec = 2): boolean {
+  return isMarketPastWindowEnd(
+    marketId,
+    (slug) => connector.marketEndSecFromSlug(slug),
+    bufferSec
+  );
+}
+
 async function emitSheetsEventOnce(
   key: string,
   payload: Parameters<typeof postTradeEventWebhook>[0]
 ): Promise<void> {
   if (postedSheetEventKeys.has(key)) return;
   postedSheetEventKeys.add(key);
+  if (useAsyncReporting()) {
+    enqueueEvent({
+      kind: "SHEETS",
+      dedupeKey: key,
+      payload,
+      tag: paperActive ? "PAPER" : "LIVE"
+    });
+    return;
+  }
   await postTradeEventWebhook(payload, paperActive ? "PAPER" : "LIVE");
 }
 
@@ -225,6 +253,9 @@ function stopBot(): void {
     clearInterval(loopTimer);
     loopTimer = null;
   }
+  if (liveActive) {
+    releaseInstanceLock();
+  }
 }
 
 async function finishSingleTrade(payload: ClosedTradePayload): Promise<void> {
@@ -238,46 +269,14 @@ async function finishSingleTrade(payload: ClosedTradePayload): Promise<void> {
   process.exit(0);
 }
 
-function isMarketPastWindowEnd(marketId: string, bufferSec = 2): boolean {
-  const endSec = connector.marketEndSecFromSlug(marketId);
-  if (endSec == null) return false;
-  return Math.floor(Date.now() / 1000) >= endSec + bufferSec;
-}
-
 /** Expired 5m window or rolled to next market — SELL on CLOB is pointless; settle/redeem instead. */
 function shouldSettleWithoutSell(
   pos: ReturnType<typeof getOpenPositions>[number],
   currentMarketId: string
 ): boolean {
-  if (isMarketPastWindowEnd(pos.marketId)) return true;
+  if (marketPastWindowEnd(pos.marketId)) return true;
   if (pos.marketId !== currentMarketId && pos.marketId.includes("-5m-")) return true;
   return false;
-}
-
-const SETTLE_REDEEM_MIN_USD = 0.05;
-
-function settleRedeemCashInUsd(
-  balanceBefore?: number,
-  balanceAfter?: number
-): number | null {
-  if (balanceBefore == null || balanceAfter == null) return null;
-  if (balanceAfter <= balanceBefore) return 0;
-  return roundMoney(balanceAfter - balanceBefore);
-}
-
-/** Expired market, Gamma unresolved, no USDC credited during settle wait → total loss. */
-function shouldAssumeTotalLossAfterSettle(
-  pos: ReturnType<typeof getOpenPositions>[number],
-  resolvedYesPrice: number | null,
-  balanceUsdcBeforeExit: number | undefined,
-  balanceUsdcAtExit: number | undefined,
-  explicitAssume?: boolean
-): boolean {
-  if (explicitAssume) return true;
-  if (resolvedYesPrice != null) return false;
-  if (!isMarketPastWindowEnd(pos.marketId, 60)) return false;
-  const redeemCashIn = settleRedeemCashInUsd(balanceUsdcBeforeExit, balanceUsdcAtExit);
-  return redeemCashIn == null || redeemCashIn < SETTLE_REDEEM_MIN_USD;
 }
 
 async function settleLivePosition(
@@ -289,15 +288,37 @@ async function settleLivePosition(
   const balanceUsdcBeforeExit = await readBalanceUsdc("pre-settle");
   removePosition(pos.marketId);
 
+  if (useAsyncReporting() && opts?.webhook !== false) {
+    enqueueEvent({
+      kind: "CLOSE_SETTLE",
+      position: { ...pos },
+      eventContext,
+      gammaResolvedYesPrice: resolvedYesPrice,
+      sellPriceLimit: opts?.sellPriceLimit,
+      assumeTotalLossHint: opts?.assumeTotalLoss,
+      balanceUsdcBeforeExit
+    });
+    logger.default.info(`  LIVE SETTLE queued ${pos.marketId} (reporter will finalize)`);
+    return buildLiveSettlePayload({
+      position: pos,
+      resolvedYesPrice,
+      balanceUsdcBeforeExit,
+      eventContext,
+      sellPriceLimit: opts?.sellPriceLimit,
+      assumeTotalLoss: opts?.assumeTotalLoss
+    });
+  }
+
   const balanceUsdcAtExit = await readSettledBalanceUsdc("post-settle");
 
-  const assumeTotalLoss = shouldAssumeTotalLossAfterSettle(
-    pos,
+  const assumeTotalLoss = shouldAssumeTotalLossAfterSettle({
+    marketId: pos.marketId,
     resolvedYesPrice,
     balanceUsdcBeforeExit,
     balanceUsdcAtExit,
-    opts?.assumeTotalLoss
-  );
+    explicitAssume: opts?.assumeTotalLoss,
+    marketEndSecFromSlug: (slug) => connector.marketEndSecFromSlug(slug)
+  });
 
   if (resolvedYesPrice == null && !assumeTotalLoss) {
     logger.default.warn(
@@ -405,7 +426,7 @@ async function closeLivePosition(
   if (!sellPricing.ok) {
     const expiredNoBook =
       (sellPricing.reason === "no_bids" || sellPricing.reason === "unavailable") &&
-      isMarketPastWindowEnd(pos.marketId);
+      marketPastWindowEnd(pos.marketId);
     if (expiredNoBook) {
       logger.default.info(
         `  LIVE SETTLE ${pos.marketId} (no bids after window end — attempting settle/redeem)`
@@ -494,6 +515,30 @@ async function closeLivePosition(
       : (res.fillPrice ?? exitQuotePrice);
 
   removePosition(pos.marketId);
+
+  if (useAsyncReporting() && opts?.webhook !== false) {
+    enqueueEvent({
+      kind: "CLOSE_FAK",
+      position: { ...pos },
+      eventContext,
+      exitQuotePrice: quoteForSlippage,
+      sellResult: res,
+      sellPriceLimit: priceLimit,
+      balanceUsdcBeforeExit
+    });
+    logger.default.info(
+      `  LIVE SELL queued ${pos.marketId} orderID=${res.orderID} (reporter will finalize)`
+    );
+    return buildLiveClosePayload({
+      position: pos,
+      exitQuotePrice: quoteForSlippage,
+      sellResult: res,
+      executionStatus: "EXECUTED",
+      balanceUsdcBeforeExit,
+      eventContext,
+      sellPriceLimit: priceLimit
+    });
+  }
 
   const balanceUsdcAtExit = await readSettledBalanceUsdc("post-sell");
 
@@ -851,12 +896,8 @@ async function loop() {
                   }
                   const feeRateBps = res.feeRateBps ?? 0;
 
-                  let balanceUsdcPostBuy: number | undefined;
-                  balanceUsdcPostBuy = await readSettledBalanceUsdc("post-buy");
-
                   const entryCosts = resolveRealEntryCosts({
                     balanceUsdcAtEntry,
-                    balanceUsdcPostBuy,
                     sizeUsd,
                     sizeShares,
                     clobEntryPriceReal,
@@ -981,6 +1022,19 @@ if (liveActive) {
     process.exit(1);
   }
   validateBotEnv();
+  try {
+    acquireInstanceLock();
+  } catch (error: unknown) {
+    const err = error as Error;
+    logger.default.error(err.message ?? String(error));
+    process.exit(1);
+  }
+  for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"] as const) {
+    process.on(signal, () => {
+      stopBot();
+      process.exit(0);
+    });
+  }
 }
 
 if (singleTradeMode) {
@@ -995,6 +1049,11 @@ if (singleTradeMode) {
   );
 } else {
   logger.default.info("Starting short-horizon bot (live → WEBHOOK_URL).");
+  if (cfg.reportingAsync) {
+    logger.default.info(
+      "  REPORTING_ASYNC=true — close/skip events enqueue to .data/event-queue.jsonl; run polymarket-reporter (pm2)."
+    );
+  }
 }
 
 await loop();

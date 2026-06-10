@@ -155,6 +155,20 @@ export function validateBotEnv(): void {
   ) {
     errors.push(`BALANCE_SETTLE_DELAY_MS must be in [0, 60000] (got ${cfg.balanceSettleDelayMs}).`);
   }
+  if (
+    !Number.isFinite(cfg.reportSettleDelayMs) ||
+    cfg.reportSettleDelayMs < 0 ||
+    cfg.reportSettleDelayMs > 300000
+  ) {
+    errors.push(`REPORT_SETTLE_DELAY_MS must be in [0, 300000] (got ${cfg.reportSettleDelayMs}).`);
+  }
+  if (
+    !Number.isFinite(cfg.reporterLoopSeconds) ||
+    cfg.reporterLoopSeconds < 1 ||
+    cfg.reporterLoopSeconds > 3600
+  ) {
+    errors.push(`REPORTER_LOOP_SECONDS must be in [1, 3600] (got ${cfg.reporterLoopSeconds}).`);
+  }
 
   const openaiKey = (process.env.OPENAI_API_KEY ?? "").trim();
   if (openaiKey && !validHttpUrl(cfg.openaiBaseUrl)) {

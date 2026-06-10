@@ -90,9 +90,34 @@ Ideas y trabajo pendiente. Orden sugerido de implementación.
 
 ---
 
+## Pendiente — Protección de capital (balance bajo / cartera reventada)
+
+**Contexto (jun 2026):** si no hay USDC en Polymarket, el bot **sigue vivo** (PM2 + loop) pero los BUY fallan (`ENTRY_FAK_FAILED`). No hay circuit breaker ni alertas. Las posiciones abiertas **sí** pueden venderse (SELL no requiere USDC).
+
+1. **Parar entradas si balance < umbral**
+   - [ ] Env `MIN_BALANCE_USD` (ej. 2) — antes de BUY, leer `getAccountBalance()`; si `availableUsdc < MIN` → skip + log `SKIP | insufficient balance`.
+   - [ ] Opcional: `PAUSE_LIVE_ON_LOW_BALANCE=true` para no intentar BUY hasta reinicio manual o depósito.
+
+2. **Límite de pérdida diaria (circuit breaker)**
+   - [ ] Env `MAX_DAILY_LOSS_USD` — acumular `pnlNet` del día desde webhooks o ledger local.
+   - [ ] Si se supera → `pm2:stop` o flag en memoria + webhook `BOT_PAUSED` a n8n.
+
+3. **Alerta n8n / Sheets cuando balance bajo**
+   - [ ] Webhook `BALANCE_LOW` (una vez por sesión o cada X horas) con `balanceUsdc`, `availableUsdc`, `MIN_BALANCE_USD`.
+   - [ ] Opcional: integrar con Telegram/Discord desde n8n.
+
+4. **Documentar en `DROPLET.md`**
+   - [ ] Qué hacer si `clob:balance` ≈ 0: parar bot, revisar `.data/open-positions.json`, depositar USDC.
+
+**Archivos (estimado):** `src/main.ts`, `src/config.ts`, `src/engine/sheetsEvent.ts`, `src/envCheck.ts`, `.env.example`, `DROPLET.md`
+
+---
+
 ## Backlog (otras ideas)
 
-- [ ] Liquidez pre-trade: leer depth del book y cap `MAX_POSITION_USD` al size fillable.
+- [ ] Liquidez pre-trade: ask depth en entrada (bid depth ya en salida); cap `MAX_POSITION_USD` al size fillable.
+- [ ] Gate EV en entrada: `pUp5m - bestAsk > MIN_EDGE` antes de BUY.
+- [ ] GitHub Actions auto-deploy droplet en push a `dev` (manual por ahora — ver `DROPLET.md` §6).
 - [ ] `single-trade` timeout global (ej. 15 min sin trade → exit).
 - [ ] Comparativa paper vs live PnL antes de prod 24/7.
 - [ ] Env sugerido documentado: `CONFIDENCE_THRESHOLD=0.82–0.85`, `MAX_POSITION_USD=1–5` en fase test.
@@ -101,8 +126,14 @@ Ideas y trabajo pendiente. Orden sugerido de implementación.
 
 ## Hecho
 
+- [x] Droplet DigitalOcean + PM2 24/7 (`DROPLET.md`, `scripts/setup-droplet.sh`, `npm run pm2:deploy`).
+- [x] Entrada CLOB best-ask + `ENTRY_BOOK_SLIPPAGE`; salida best-bid + `EXIT_BOOK_SLIPPAGE` / `_URGENT`.
+- [x] Spread guard `ENTRY_BOOK_MAX_SPREAD`; skip `BOOK_TOO_EXPENSIVE`.
+- [x] Partial fill en entrada (`fillShares`/`fillUsd` reales) y en salida (`updatePosition` + retry).
+- [x] Webhooks `EXIT_SKIP`, `NO_BOOK_LIQUIDITY`; `MAX_FAK_BUY_ATTEMPTS=2`; log `OPEN` solo tras BUY OK.
+- [x] Settlement proactivo; fees plausibles en `tradeWebhook.ts`; `sell()` **FAK** (ya no FOK).
 - [x] `@polymarket/clob-client-v2@1.0.6` — órdenes `POLY_1271` (signer=funder).
-- [x] `buy()` FAK, `sell()` FOK; CLOB 400/error → `success: false`.
+- [x] `buy()` FAK, `sell()` FAK; CLOB 400/error → `success: false`.
 - [x] `ENTRY_SLIPPAGE`, `ENTRY_PRICE_MAX=0.95`, `liveEntryPriceLimit()`.
 - [x] `--single-trade` / `npm run dev:single-trade` + `forceLive`.
 - [x] Posiciones live en `.data/open-positions.json` + migración legacy.
