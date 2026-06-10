@@ -6,6 +6,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+- Fixed: Expired settle with unresolved Gamma and no redeem credit on wallet records `LOSS` and full `pnlNet` instead of `PENDING_SETTLEMENT` with `pnlGross=0` (`src/main.ts`, `src/engine/liveTrader.ts`).
 - Fixed: Expired/stale live positions skip the SELL loop when the 5m window has passed or the book has no bids — settle/redeem directly, record total loss when resolution is unknown, and remove the position (`src/main.ts`, `src/engine/liveTrader.ts`).
 - Fixed: Live fee/PnL snapshots wait `BALANCE_SETTLE_DELAY_MS` (default 8s) after buy/sell/settle before reading CLOB USDC; fees derived from wallet cash-in/out deltas (`src/connectors/balanceSettle.ts`, `src/main.ts`, `src/engine/liveTrader.ts`, `src/engine/tradeWebhook.ts`).
 - Fixed: Live entry `entryFeeUsd`, `entryCashOutUsd`, and all-in `entryPriceReal` derived from pre/post-buy CLOB balance snapshots instead of estimated bps fees (`src/main.ts`, `src/types/index.ts`, `src/engine/sheetsEvent.ts`).

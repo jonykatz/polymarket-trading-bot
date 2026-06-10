@@ -254,22 +254,61 @@ function shouldSettleWithoutSell(
   return false;
 }
 
+const SETTLE_REDEEM_MIN_USD = 0.05;
+
+function settleRedeemCashInUsd(
+  balanceBefore?: number,
+  balanceAfter?: number
+): number | null {
+  if (balanceBefore == null || balanceAfter == null) return null;
+  if (balanceAfter <= balanceBefore) return 0;
+  return roundMoney(balanceAfter - balanceBefore);
+}
+
+/** Expired market, Gamma unresolved, no USDC credited during settle wait → total loss. */
+function shouldAssumeTotalLossAfterSettle(
+  pos: ReturnType<typeof getOpenPositions>[number],
+  resolvedYesPrice: number | null,
+  balanceUsdcBeforeExit: number | undefined,
+  balanceUsdcAtExit: number | undefined,
+  explicitAssume?: boolean
+): boolean {
+  if (explicitAssume) return true;
+  if (resolvedYesPrice != null) return false;
+  if (!isMarketPastWindowEnd(pos.marketId, 60)) return false;
+  const redeemCashIn = settleRedeemCashInUsd(balanceUsdcBeforeExit, balanceUsdcAtExit);
+  return redeemCashIn == null || redeemCashIn < SETTLE_REDEEM_MIN_USD;
+}
+
 async function settleLivePosition(
   pos: ReturnType<typeof getOpenPositions>[number],
   resolvedYesPrice: number | null,
   eventContext: TradeEventContext,
   opts?: { webhook?: boolean; sellPriceLimit?: number; assumeTotalLoss?: boolean }
 ): Promise<ClosedTradePayload> {
-  if (resolvedYesPrice == null) {
-    logger.default.warn(
-      `  SETTLE ${pos.marketId}: market closed but resolution pending (settlementOutcome=PENDING_SETTLEMENT)`
-    );
-  }
-
   const balanceUsdcBeforeExit = await readBalanceUsdc("pre-settle");
   removePosition(pos.marketId);
 
   const balanceUsdcAtExit = await readSettledBalanceUsdc("post-settle");
+
+  const assumeTotalLoss = shouldAssumeTotalLossAfterSettle(
+    pos,
+    resolvedYesPrice,
+    balanceUsdcBeforeExit,
+    balanceUsdcAtExit,
+    opts?.assumeTotalLoss
+  );
+
+  if (resolvedYesPrice == null && !assumeTotalLoss) {
+    logger.default.warn(
+      `  SETTLE ${pos.marketId}: market closed but resolution pending (settlementOutcome=PENDING_SETTLEMENT)`
+    );
+  } else if (assumeTotalLoss && resolvedYesPrice == null) {
+    const redeemCashIn = settleRedeemCashInUsd(balanceUsdcBeforeExit, balanceUsdcAtExit);
+    logger.default.warn(
+      `  SETTLE ${pos.marketId}: no redeem credit (cashIn=${redeemCashIn?.toFixed(2) ?? "?"}) — recording total loss`
+    );
+  }
 
   return finalizeLiveSettle(
     {
@@ -279,7 +318,7 @@ async function settleLivePosition(
       balanceUsdcAtExit,
       eventContext,
       sellPriceLimit: opts?.sellPriceLimit,
-      assumeTotalLoss: opts?.assumeTotalLoss
+      assumeTotalLoss
     },
     { webhook: opts?.webhook }
   );

@@ -201,6 +201,10 @@ export function buildLiveSettlePayload(input: LiveSettleInput) {
   const settlementOutcome = input.assumeTotalLoss
     ? "LOSS"
     : resolveSettlementOutcome(position.side, resolvedYesPrice);
+  const entryCashOut = position.entryCashOutUsd ?? roundMoney(entryCostUsd + (position.entryFeeUsd ?? 0));
+  const pnlNet = input.assumeTotalLoss
+    ? roundMoney(-entryCashOut)
+    : wallet.pnlNet;
 
   return buildClosedTradePayload({
     marketId: position.marketId,
@@ -208,17 +212,21 @@ export function buildLiveSettlePayload(input: LiveSettleInput) {
     entryPrice,
     exitPrice,
     entryPriceReal,
-    exitPriceReal: pendingSettlement ? entryPriceReal : exitPriceReal,
+    exitPriceReal: input.assumeTotalLoss ? 0 : pendingSettlement ? entryPriceReal : exitPriceReal,
     slippageEntry,
     slippageExit: 0,
-    polymarketFee: wallet.polymarketFee,
+    polymarketFee: input.assumeTotalLoss
+      ? roundPrice(position.entryFeeUsd ?? wallet.polymarketFee)
+      : wallet.polymarketFee,
     balanceUsdcAtEntry: position.balanceUsdcAtEntry,
     balanceUsdcAtExit: input.balanceUsdcAtExit,
     sizeUsd,
     pnlGross,
-    pnlNet: wallet.pnlNet,
-    roundTripNotionalUsd: wallet.roundTripNotionalUsd,
-    preferWalletMetrics: wallet.walletMetricsFromBalance,
+    pnlNet,
+    roundTripNotionalUsd: input.assumeTotalLoss
+      ? entryCashOut
+      : wallet.roundTripNotionalUsd,
+    preferWalletMetrics: wallet.walletMetricsFromBalance && !input.assumeTotalLoss,
     signals,
     executionStatus: "EXECUTED",
     recordType: "TRADE_CLOSED_SETTLE",
