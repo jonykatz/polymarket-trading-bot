@@ -16,6 +16,7 @@ import {
   postTradeEventWebhook,
   type TradeEventContext
 } from "./sheetsEvent.js";
+import type { EventExitSnapshots } from "./walletSnapshots.js";
 
 export type LiveCloseInput = {
   position: LivePosition;
@@ -26,6 +27,8 @@ export type LiveCloseInput = {
   balanceUsdcBeforeExit?: number;
   /** CLOB USDC balance after the sell settles. */
   balanceUsdcAtExit?: number;
+  /** Trade-scoped snapshots — avoids contaminated delayed global balance reads. */
+  eventSnapshots?: EventExitSnapshots;
   eventContext: TradeEventContext;
   sellPriceLimit?: number;
 };
@@ -159,6 +162,8 @@ export type LiveSettleInput = {
   sellPriceLimit?: number;
   /** When resolution is unknown and redeem returned $0 — record total loss and clean up. */
   assumeTotalLoss?: boolean;
+  /** Trade-scoped snapshots — avoids contaminated delayed global balance reads. */
+  eventSnapshots?: EventExitSnapshots;
 };
 
 export function buildLiveSettlePayload(input: LiveSettleInput) {
@@ -202,9 +207,15 @@ export function buildLiveSettlePayload(input: LiveSettleInput) {
     ? "LOSS"
     : resolveSettlementOutcome(position.side, resolvedYesPrice);
   const entryCashOut = position.entryCashOutUsd ?? roundMoney(entryCostUsd + (position.entryFeeUsd ?? 0));
-  const pnlNet = input.assumeTotalLoss
+  const snapshots = input.eventSnapshots;
+  const pnlNet = snapshots?.pnlNet ?? (input.assumeTotalLoss
     ? roundMoney(-entryCashOut)
-    : wallet.pnlNet;
+    : wallet.pnlNet);
+  const balanceAtExit =
+    snapshots?.balanceUsdcAtExit ?? input.balanceUsdcAtExit;
+  const roundTripNotional =
+    snapshots?.roundTripNotionalUsd ??
+    (input.assumeTotalLoss ? entryCashOut : wallet.roundTripNotionalUsd);
 
   return buildClosedTradePayload({
     marketId: position.marketId,
@@ -218,15 +229,14 @@ export function buildLiveSettlePayload(input: LiveSettleInput) {
     polymarketFee: input.assumeTotalLoss
       ? roundPrice(position.entryFeeUsd ?? wallet.polymarketFee)
       : wallet.polymarketFee,
-    balanceUsdcAtEntry: position.balanceUsdcAtEntry,
-    balanceUsdcAtExit: input.balanceUsdcAtExit,
+    balanceUsdcAtEntry: snapshots?.balanceUsdcAtEntry ?? position.balanceUsdcAtEntry,
+    balanceUsdcAtExit: balanceAtExit,
     sizeUsd,
     pnlGross,
     pnlNet,
-    roundTripNotionalUsd: input.assumeTotalLoss
-      ? entryCashOut
-      : wallet.roundTripNotionalUsd,
-    preferWalletMetrics: wallet.walletMetricsFromBalance && !input.assumeTotalLoss,
+    roundTripNotionalUsd: roundTripNotional,
+    preferWalletMetrics: snapshots != null || (wallet.walletMetricsFromBalance && !input.assumeTotalLoss),
+    useEventSnapshots: snapshots != null,
     signals,
     executionStatus: "EXECUTED",
     recordType: "TRADE_CLOSED_SETTLE",
@@ -293,7 +303,8 @@ export function buildLiveClosePayload(input: LiveCloseInput) {
     feeRateBps
   });
 
-  if (wallet.walletMetricsFromBalance) {
+  const snapshots = input.eventSnapshots;
+  if (wallet.walletMetricsFromBalance && snapshots == null) {
     logger.default.info(
       `  wallet fees entry=${(position.entryFeeUsd ?? 0).toFixed(4)} exit=${wallet.exitFeeUsd.toFixed(4)} ` +
         `cashIn=${wallet.exitCashInUsd?.toFixed(2) ?? "?"} roundTrip=${wallet.roundTripNotionalUsd.toFixed(2)}`
@@ -310,13 +321,14 @@ export function buildLiveClosePayload(input: LiveCloseInput) {
     slippageEntry,
     slippageExit,
     polymarketFee: wallet.polymarketFee,
-    balanceUsdcAtEntry: position.balanceUsdcAtEntry,
-    balanceUsdcAtExit: input.balanceUsdcAtExit,
+    balanceUsdcAtEntry: snapshots?.balanceUsdcAtEntry ?? position.balanceUsdcAtEntry,
+    balanceUsdcAtExit: snapshots?.balanceUsdcAtExit ?? input.balanceUsdcAtExit,
     sizeUsd,
     pnlGross,
-    pnlNet: wallet.pnlNet,
-    roundTripNotionalUsd: wallet.roundTripNotionalUsd,
-    preferWalletMetrics: wallet.walletMetricsFromBalance,
+    pnlNet: snapshots?.pnlNet ?? wallet.pnlNet,
+    roundTripNotionalUsd: snapshots?.roundTripNotionalUsd ?? wallet.roundTripNotionalUsd,
+    preferWalletMetrics: snapshots != null || wallet.walletMetricsFromBalance,
+    useEventSnapshots: snapshots != null,
     signals,
     executionStatus,
     recordType: "TRADE_CLOSED_FAK",

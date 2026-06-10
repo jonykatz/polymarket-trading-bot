@@ -6,6 +6,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+- Fixed: Reporter and sync close/settle derive `pnlNet`/`balanceUsdcAtExit` from per-trade event snapshots instead of delayed global wallet reads; auto `assumeTotalLoss` on settle without redeem credit; `polymarketFeePct` null when `pnlGross=0` or notional &lt; $0.50 (`src/engine/walletSnapshots.ts`, `src/reportingLoop.ts`, `src/engine/liveTrader.ts`, `src/engine/tradeWebhook.ts`, `src/main.ts`).
 - Added: `src/engine/instanceLock.ts` — live startup acquires `.data/bot-instance.lock` so two PM2/dev processes on the same machine cannot trade the same wallet concurrently.
 - Added: Async reporting architecture — trading loop enqueues close/settle/skip events to `.data/event-queue.jsonl`; `polymarket-reporter` PM2 process waits `REPORT_SETTLE_DELAY_MS`, reads balance/Gamma, posts n8n webhooks (`src/engine/eventQueue.ts`, `src/reportingLoop.ts`, `src/engine/settleAssumptions.ts`, `ecosystem.config.cjs`).
 - Fixed: Expired settle with unresolved Gamma and no redeem credit on wallet records `LOSS` and full `pnlNet` instead of `PENDING_SETTLEMENT` with `pnlGross=0` (`src/main.ts`, `src/engine/liveTrader.ts`).

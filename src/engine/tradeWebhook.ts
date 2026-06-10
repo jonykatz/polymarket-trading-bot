@@ -46,8 +46,8 @@ export type ClosedTradePayload = {
   slippageEntry: number;
   slippageExit: number;
   polymarketFee: number;
-  /** Fee as % of round-trip notional (entry + exit). */
-  polymarketFeePct: number;
+  /** Fee as % of round-trip notional (entry + exit); null when not meaningful. */
+  polymarketFeePct: number | null;
   /** CLOB USDC balance before opening the position; null in paper or if unavailable. */
   balanceUsdcAtEntry: number | null;
   /** CLOB USDC balance after closing the position; null in paper or if unavailable. */
@@ -136,6 +136,8 @@ export function buildClosedTradePayload(input: {
   roundTripNotionalUsd?: number;
   /** When true, use passed pnlNet/polymarketFee from wallet snapshots (post-settle). */
   preferWalletMetrics?: boolean;
+  /** When true, trust event snapshots for pnlNet/balances — skip balance-delta reconciliation. */
+  useEventSnapshots?: boolean;
   signals: PredictionSignals;
   executionStatus: ExecutionStatus;
   recordType?: TradeRecordType;
@@ -155,7 +157,7 @@ export function buildClosedTradePayload(input: {
   let polymarketFee = estimatedFeeUsd;
   let pnlNet: number;
 
-  if (input.preferWalletMetrics && input.pnlNet != null) {
+  if ((input.useEventSnapshots || input.preferWalletMetrics) && input.pnlNet != null) {
     pnlNet = roundMoney(input.pnlNet);
     polymarketFee = estimatedFeeUsd;
   } else {
@@ -180,8 +182,10 @@ export function buildClosedTradePayload(input: {
   const roundTripNotional =
     input.roundTripNotionalUsd ??
     (input.sizeUsd > 0 ? input.sizeUsd * 2 : 0);
-  const polymarketFeePct =
-    input.polymarketFeePct ?? computePolymarketFeePct(polymarketFee, roundTripNotional);
+  const polymarketFeePct: number | null =
+    pnlGross === 0 || roundTripNotional < 0.5
+      ? null
+      : (input.polymarketFeePct ?? computePolymarketFeePct(polymarketFee, roundTripNotional));
 
   const payload: ClosedTradePayload = {
     timestamp,

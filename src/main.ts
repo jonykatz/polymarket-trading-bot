@@ -32,6 +32,10 @@ import {
   shouldAssumeTotalLossAfterSettle
 } from "./engine/settleAssumptions.js";
 import {
+  resolveFakExitSnapshots,
+  resolveSettleExitSnapshots
+} from "./engine/walletSnapshots.js";
+import {
   PaperTrader,
   bidDepthAtOrAbove,
   isValidEntryPrice,
@@ -309,23 +313,34 @@ async function settleLivePosition(
     });
   }
 
-  const balanceUsdcAtExit = await readSettledBalanceUsdc("post-settle");
+  const balanceAfterSettleLeg = await readSettledBalanceUsdc("post-settle");
 
   const assumeTotalLoss = shouldAssumeTotalLossAfterSettle({
     marketId: pos.marketId,
     resolvedYesPrice,
     balanceUsdcBeforeExit,
-    balanceUsdcAtExit,
+    balanceUsdcAtExit: balanceAfterSettleLeg,
     explicitAssume: opts?.assumeTotalLoss,
     marketEndSecFromSlug: (slug) => connector.marketEndSecFromSlug(slug)
   });
+
+  const eventSnapshots =
+    balanceUsdcBeforeExit != null
+      ? resolveSettleExitSnapshots({
+          position: pos,
+          resolvedYesPrice,
+          assumeTotalLoss,
+          balanceUsdcBeforeExit,
+          balanceUsdcAfterSettleLeg: balanceAfterSettleLeg
+        })
+      : undefined;
 
   if (resolvedYesPrice == null && !assumeTotalLoss) {
     logger.default.warn(
       `  SETTLE ${pos.marketId}: market closed but resolution pending (settlementOutcome=PENDING_SETTLEMENT)`
     );
   } else if (assumeTotalLoss && resolvedYesPrice == null) {
-    const redeemCashIn = settleRedeemCashInUsd(balanceUsdcBeforeExit, balanceUsdcAtExit);
+    const redeemCashIn = settleRedeemCashInUsd(balanceUsdcBeforeExit, balanceAfterSettleLeg);
     logger.default.warn(
       `  SETTLE ${pos.marketId}: no redeem credit (cashIn=${redeemCashIn?.toFixed(2) ?? "?"}) — recording total loss`
     );
@@ -336,10 +351,10 @@ async function settleLivePosition(
       position: pos,
       resolvedYesPrice,
       balanceUsdcBeforeExit,
-      balanceUsdcAtExit,
       eventContext,
       sellPriceLimit: opts?.sellPriceLimit,
-      assumeTotalLoss
+      assumeTotalLoss,
+      eventSnapshots
     },
     { webhook: opts?.webhook }
   );
@@ -540,7 +555,15 @@ async function closeLivePosition(
     });
   }
 
-  const balanceUsdcAtExit = await readSettledBalanceUsdc("post-sell");
+  const eventSnapshots =
+    balanceUsdcBeforeExit != null
+      ? resolveFakExitSnapshots({
+          position: pos,
+          sellResult: res,
+          exitQuotePrice: quoteForSlippage,
+          balanceUsdcBeforeExit
+        })
+      : undefined;
 
   const payload = await finalizeLiveClose(
     {
@@ -549,9 +572,9 @@ async function closeLivePosition(
       sellResult: res,
       executionStatus: "EXECUTED",
       balanceUsdcBeforeExit,
-      balanceUsdcAtExit,
       eventContext,
-      sellPriceLimit: priceLimit
+      sellPriceLimit: priceLimit,
+      eventSnapshots
     },
     { webhook: opts?.webhook }
   );

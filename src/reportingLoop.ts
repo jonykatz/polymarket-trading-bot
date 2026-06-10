@@ -19,6 +19,10 @@ import {
   settleRedeemCashInUsd,
   shouldAssumeTotalLossAfterSettle
 } from "./engine/settleAssumptions.js";
+import {
+  resolveFakExitSnapshots,
+  resolveSettleExitSnapshots
+} from "./engine/walletSnapshots.js";
 
 const MAX_WEBHOOK_RETRIES = 5;
 const connector = new PolymarketConnector(cfg.polymarketRestBase);
@@ -30,15 +34,30 @@ async function processCloseSettle(event: QueuedCloseSettleEvent): Promise<boolea
 
   const balanceUsdcBeforeExit =
     event.balanceUsdcBeforeExit ?? (await readBalanceUsdc("reporter-pre-settle"));
-  const balanceUsdcAtExit = await readSettledBalanceUsdc("reporter-post-settle");
+  if (balanceUsdcBeforeExit == null) {
+    logger.default.error(
+      `  [reporter] SETTLE ${event.position.marketId}: balanceUsdcBeforeExit unavailable — will retry`
+    );
+    return false;
+  }
+
+  const balanceAfterSettleLeg = await readSettledBalanceUsdc("reporter-post-settle");
 
   const assumeTotalLoss = shouldAssumeTotalLossAfterSettle({
     marketId: event.position.marketId,
     resolvedYesPrice,
     balanceUsdcBeforeExit,
-    balanceUsdcAtExit,
+    balanceUsdcAtExit: balanceAfterSettleLeg,
     explicitAssume: event.assumeTotalLossHint,
     marketEndSecFromSlug: (slug) => connector.marketEndSecFromSlug(slug)
+  });
+
+  const eventSnapshots = resolveSettleExitSnapshots({
+    position: event.position,
+    resolvedYesPrice,
+    assumeTotalLoss,
+    balanceUsdcBeforeExit,
+    balanceUsdcAfterSettleLeg: balanceAfterSettleLeg
   });
 
   if (resolvedYesPrice == null && !assumeTotalLoss) {
@@ -46,7 +65,7 @@ async function processCloseSettle(event: QueuedCloseSettleEvent): Promise<boolea
       `  [reporter] SETTLE ${event.position.marketId}: resolution pending (settlementOutcome=PENDING_SETTLEMENT)`
     );
   } else if (assumeTotalLoss && resolvedYesPrice == null) {
-    const redeemCashIn = settleRedeemCashInUsd(balanceUsdcBeforeExit, balanceUsdcAtExit);
+    const redeemCashIn = settleRedeemCashInUsd(balanceUsdcBeforeExit, balanceAfterSettleLeg);
     logger.default.warn(
       `  [reporter] SETTLE ${event.position.marketId}: no redeem credit (cashIn=${redeemCashIn?.toFixed(2) ?? "?"}, min=${SETTLE_REDEEM_MIN_USD}) — recording total loss`
     );
@@ -57,10 +76,10 @@ async function processCloseSettle(event: QueuedCloseSettleEvent): Promise<boolea
       position: event.position,
       resolvedYesPrice,
       balanceUsdcBeforeExit,
-      balanceUsdcAtExit,
       eventContext: event.eventContext,
       sellPriceLimit: event.sellPriceLimit,
-      assumeTotalLoss
+      assumeTotalLoss,
+      eventSnapshots
     },
     { webhook: true }
   );
@@ -70,7 +89,19 @@ async function processCloseSettle(event: QueuedCloseSettleEvent): Promise<boolea
 async function processCloseFak(event: QueuedCloseFakEvent): Promise<boolean> {
   const balanceUsdcBeforeExit =
     event.balanceUsdcBeforeExit ?? (await readBalanceUsdc("reporter-pre-sell"));
-  const balanceUsdcAtExit = await readSettledBalanceUsdc("reporter-post-sell");
+  if (balanceUsdcBeforeExit == null) {
+    logger.default.error(
+      `  [reporter] FAK ${event.position.marketId}: balanceUsdcBeforeExit unavailable — will retry`
+    );
+    return false;
+  }
+
+  const eventSnapshots = resolveFakExitSnapshots({
+    position: event.position,
+    sellResult: event.sellResult,
+    exitQuotePrice: event.exitQuotePrice,
+    balanceUsdcBeforeExit
+  });
 
   await finalizeLiveClose(
     {
@@ -79,9 +110,9 @@ async function processCloseFak(event: QueuedCloseFakEvent): Promise<boolean> {
       sellResult: event.sellResult,
       executionStatus: "EXECUTED",
       balanceUsdcBeforeExit,
-      balanceUsdcAtExit,
       eventContext: event.eventContext,
-      sellPriceLimit: event.sellPriceLimit
+      sellPriceLimit: event.sellPriceLimit,
+      eventSnapshots
     },
     { webhook: true }
   );
