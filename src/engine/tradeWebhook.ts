@@ -134,6 +134,8 @@ export function buildClosedTradePayload(input: {
   pnlGross: number;
   pnlNet?: number;
   roundTripNotionalUsd?: number;
+  /** When true, use passed pnlNet/polymarketFee from wallet snapshots (post-settle). */
+  preferWalletMetrics?: boolean;
   signals: PredictionSignals;
   executionStatus: ExecutionStatus;
   recordType?: TradeRecordType;
@@ -148,23 +150,33 @@ export function buildClosedTradePayload(input: {
   const pnlGross = roundMoney(input.pnlGross);
   const balanceAtEntry = input.balanceUsdcAtEntry;
   const balanceAtExit = input.balanceUsdcAtExit;
-  const pnlNetFromBalance =
-    balanceAtEntry != null && balanceAtExit != null
-      ? roundMoney(balanceAtExit - balanceAtEntry)
-      : undefined;
   const estimatedFeeUsd = roundPrice(input.polymarketFee);
-  const balanceDeltaPlausible =
-    pnlNetFromBalance != null &&
-    Math.abs(pnlNetFromBalance - pnlGross) <= Math.max(0.15, Math.abs(pnlGross) * 0.35);
-  const feeFromBalance =
-    balanceDeltaPlausible && pnlNetFromBalance != null
-      ? roundPrice(Math.max(0, pnlGross - pnlNetFromBalance))
-      : undefined;
-  const polymarketFee = feeFromBalance ?? estimatedFeeUsd;
-  const pnlNet =
-    balanceDeltaPlausible && pnlNetFromBalance != null
-      ? pnlNetFromBalance
-      : input.pnlNet ?? roundMoney(pnlGross - polymarketFee);
+
+  let polymarketFee = estimatedFeeUsd;
+  let pnlNet: number;
+
+  if (input.preferWalletMetrics && input.pnlNet != null) {
+    pnlNet = roundMoney(input.pnlNet);
+    polymarketFee = estimatedFeeUsd;
+  } else {
+    const pnlNetFromBalance =
+      balanceAtEntry != null && balanceAtExit != null
+        ? roundMoney(balanceAtExit - balanceAtEntry)
+        : undefined;
+    const balanceDeltaPlausible =
+      pnlNetFromBalance != null &&
+      Math.abs(pnlNetFromBalance - pnlGross) <= Math.max(0.15, Math.abs(pnlGross) * 0.35);
+    const feeFromBalance =
+      balanceDeltaPlausible && pnlNetFromBalance != null
+        ? roundPrice(Math.max(0, pnlGross - pnlNetFromBalance))
+        : undefined;
+    polymarketFee = feeFromBalance ?? estimatedFeeUsd;
+    pnlNet =
+      balanceDeltaPlausible && pnlNetFromBalance != null
+        ? pnlNetFromBalance
+        : input.pnlNet ?? roundMoney(pnlGross - polymarketFee);
+  }
+
   const roundTripNotional =
     input.roundTripNotionalUsd ??
     (input.sizeUsd > 0 ? input.sizeUsd * 2 : 0);

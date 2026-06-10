@@ -48,5 +48,7 @@ export const cfg = {
   webhookUrl: (process.env.WEBHOOK_URL ?? "").trim(),
   liveTradingEnabled:
     Boolean(process.env.PRIVATE_KEY?.trim()) && !envBool(process.env.PAPER_MODE, false),
-  closeAfterSeconds: Number(process.env.CLOSE_AFTER_SECONDS ?? 0)
+  closeAfterSeconds: Number(process.env.CLOSE_AFTER_SECONDS ?? 0),
+  /** Ms to wait after buy/sell/settle before reading CLOB USDC for fee/PnL snapshots. */
+  balanceSettleDelayMs: Number(process.env.BALANCE_SETTLE_DELAY_MS ?? 8000)
 };

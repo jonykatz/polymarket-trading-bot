@@ -6,6 +6,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+- Fixed: Live fee/PnL snapshots wait `BALANCE_SETTLE_DELAY_MS` (default 8s) after buy/sell/settle before reading CLOB USDC; fees derived from wallet cash-in/out deltas (`src/connectors/balanceSettle.ts`, `src/main.ts`, `src/engine/liveTrader.ts`, `src/engine/tradeWebhook.ts`).
 - Fixed: Live entry `entryFeeUsd`, `entryCashOutUsd`, and all-in `entryPriceReal` derived from pre/post-buy CLOB balance snapshots instead of estimated bps fees (`src/main.ts`, `src/types/index.ts`, `src/engine/sheetsEvent.ts`).
 - Added: `DROPLET.md` and `scripts/setup-droplet.sh` for DigitalOcean SSH, PM2, logs, and one-time deploy.
 - Added: Live FAK entry positions store actual CLOB `fillShares` and `fillUsd`, with a partial-fill warning when filled size is below planned (`main.ts`).

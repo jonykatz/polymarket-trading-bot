@@ -22,6 +22,8 @@ export type LiveCloseInput = {
   exitQuotePrice: number;
   sellResult: PlaceOrderResult;
   executionStatus?: ExecutionStatus;
+  /** CLOB USDC balance immediately before the sell. */
+  balanceUsdcBeforeExit?: number;
   /** CLOB USDC balance after the sell settles. */
   balanceUsdcAtExit?: number;
   eventContext: TradeEventContext;
@@ -51,6 +53,78 @@ function estimateFeeUsd(notionalUsd: number, feeRateBps: number): number {
   return roundPrice((notionalUsd * feeRateBps) / 10000);
 }
 
+type WalletMetrics = {
+  polymarketFee: number;
+  roundTripNotionalUsd: number;
+  pnlNet?: number;
+  walletMetricsFromBalance: boolean;
+  exitCashInUsd?: number;
+  exitFeeUsd: number;
+};
+
+/** Fees and round-trip PnL from pre/post wallet snapshots when available. */
+function resolveWalletMetrics(input: {
+  position: LivePosition;
+  exitProceedsUsd: number;
+  entryCostUsd: number;
+  balanceUsdcBeforeExit?: number;
+  balanceUsdcAtExit?: number;
+  feeRateBps?: number;
+}): WalletMetrics {
+  const {
+    position,
+    exitProceedsUsd,
+    entryCostUsd,
+    balanceUsdcBeforeExit,
+    balanceUsdcAtExit,
+    feeRateBps = 0
+  } = input;
+
+  const entryCashOut = position.entryCashOutUsd;
+  const entryFeeUsd =
+    position.entryFeeUsd ??
+    (entryCashOut != null && entryCashOut > entryCostUsd
+      ? roundMoney(entryCashOut - entryCostUsd)
+      : estimateFeeUsd(entryCostUsd, feeRateBps));
+
+  let exitCashInUsd: number | undefined;
+  let exitFeeUsd = estimateFeeUsd(exitProceedsUsd, feeRateBps);
+  let walletMetricsFromBalance = false;
+
+  if (
+    balanceUsdcBeforeExit != null &&
+    balanceUsdcAtExit != null &&
+    balanceUsdcAtExit > balanceUsdcBeforeExit
+  ) {
+    exitCashInUsd = roundMoney(balanceUsdcAtExit - balanceUsdcBeforeExit);
+    exitFeeUsd = roundPrice(Math.max(0, exitCashInUsd - exitProceedsUsd));
+    walletMetricsFromBalance = true;
+  }
+
+  const polymarketFee = walletMetricsFromBalance
+    ? roundPrice(entryFeeUsd + exitFeeUsd)
+    : roundPrice(entryFeeUsd + estimateFeeUsd(exitProceedsUsd, feeRateBps));
+
+  const entryNotional = entryCashOut ?? entryCostUsd;
+  const exitNotional = exitCashInUsd ?? exitProceedsUsd;
+  const roundTripNotionalUsd = roundMoney(entryNotional + exitNotional);
+
+  const balanceAtEntry = position.balanceUsdcAtEntry;
+  const pnlNet =
+    walletMetricsFromBalance && balanceAtEntry != null && balanceUsdcAtExit != null
+      ? roundMoney(balanceUsdcAtExit - balanceAtEntry)
+      : undefined;
+
+  return {
+    polymarketFee,
+    roundTripNotionalUsd,
+    pnlNet,
+    walletMetricsFromBalance,
+    exitCashInUsd,
+    exitFeeUsd
+  };
+}
+
 /** CLOB errors that usually mean the market token is gone (resolved / expired). */
 export function isSellErrorLikelySettled(errorMsg?: string): boolean {
   if (!errorMsg) return false;
@@ -77,6 +151,8 @@ export type LiveSettleInput = {
   position: LivePosition;
   resolvedYesPrice: number | null;
   lastSellErrorMsg?: string;
+  /** CLOB USDC balance immediately before settlement credits. */
+  balanceUsdcBeforeExit?: number;
   balanceUsdcAtExit?: number;
   eventContext: TradeEventContext;
   /** Omitted for proactive settlement (no sell attempted). */
@@ -106,12 +182,14 @@ export function buildLiveSettlePayload(input: LiveSettleInput) {
   const pnlGross = pendingSettlement ? 0 : roundMoney(exitProceedsUsd - entryCostUsd);
 
   const feeRateBps = position.feeRateBps ?? 0;
-  const entryFeeUsd = position.entryFeeUsd ?? estimateFeeUsd(entryCostUsd, feeRateBps);
-  const exitFeeUsd = pendingSettlement ? 0 : estimateFeeUsd(exitProceedsUsd, feeRateBps);
-  const polymarketFee = roundPrice(entryFeeUsd + exitFeeUsd);
-  const roundTripNotionalUsd = pendingSettlement
-    ? roundMoney(entryCostUsd)
-    : roundMoney(entryCostUsd + exitProceedsUsd);
+  const wallet = resolveWalletMetrics({
+    position,
+    exitProceedsUsd,
+    entryCostUsd,
+    balanceUsdcBeforeExit: input.balanceUsdcBeforeExit,
+    balanceUsdcAtExit: input.balanceUsdcAtExit,
+    feeRateBps
+  });
   const settlementOutcome = resolveSettlementOutcome(position.side, resolvedYesPrice);
 
   return buildClosedTradePayload({
@@ -123,12 +201,14 @@ export function buildLiveSettlePayload(input: LiveSettleInput) {
     exitPriceReal: pendingSettlement ? entryPriceReal : exitPriceReal,
     slippageEntry,
     slippageExit: 0,
-    polymarketFee,
+    polymarketFee: wallet.polymarketFee,
     balanceUsdcAtEntry: position.balanceUsdcAtEntry,
     balanceUsdcAtExit: input.balanceUsdcAtExit,
     sizeUsd,
     pnlGross,
-    roundTripNotionalUsd,
+    pnlNet: wallet.pnlNet,
+    roundTripNotionalUsd: wallet.roundTripNotionalUsd,
+    preferWalletMetrics: wallet.walletMetricsFromBalance,
     signals,
     executionStatus: "EXECUTED",
     recordType: "TRADE_CLOSED_SETTLE",
@@ -186,11 +266,21 @@ export function buildLiveClosePayload(input: LiveCloseInput) {
   const pnlGross = roundMoney(exitProceedsUsd - entryCostUsd);
 
   const feeRateBps = position.feeRateBps ?? sellResult.feeRateBps ?? 0;
-  const entryFeeUsd = position.entryFeeUsd ?? estimateFeeUsd(entryCostUsd, feeRateBps);
-  const exitFeeUsd = estimateFeeUsd(exitProceedsUsd, feeRateBps);
-  const polymarketFee = roundPrice(entryFeeUsd + exitFeeUsd);
+  const wallet = resolveWalletMetrics({
+    position,
+    exitProceedsUsd,
+    entryCostUsd,
+    balanceUsdcBeforeExit: input.balanceUsdcBeforeExit,
+    balanceUsdcAtExit: input.balanceUsdcAtExit,
+    feeRateBps
+  });
 
-  const roundTripNotionalUsd = roundMoney(entryCostUsd + exitProceedsUsd);
+  if (wallet.walletMetricsFromBalance) {
+    logger.default.info(
+      `  wallet fees entry=${(position.entryFeeUsd ?? 0).toFixed(4)} exit=${wallet.exitFeeUsd.toFixed(4)} ` +
+        `cashIn=${wallet.exitCashInUsd?.toFixed(2) ?? "?"} roundTrip=${wallet.roundTripNotionalUsd.toFixed(2)}`
+    );
+  }
 
   return buildClosedTradePayload({
     marketId: position.marketId,
@@ -201,12 +291,14 @@ export function buildLiveClosePayload(input: LiveCloseInput) {
     exitPriceReal,
     slippageEntry,
     slippageExit,
-    polymarketFee,
+    polymarketFee: wallet.polymarketFee,
     balanceUsdcAtEntry: position.balanceUsdcAtEntry,
     balanceUsdcAtExit: input.balanceUsdcAtExit,
     sizeUsd,
     pnlGross,
-    roundTripNotionalUsd,
+    pnlNet: wallet.pnlNet,
+    roundTripNotionalUsd: wallet.roundTripNotionalUsd,
+    preferWalletMetrics: wallet.walletMetricsFromBalance,
     signals,
     executionStatus,
     recordType: "TRADE_CLOSED_FAK",

@@ -148,6 +148,13 @@ export function validateBotEnv(): void {
   if (!Number.isFinite(cfg.closeAfterSeconds) || cfg.closeAfterSeconds < 0) {
     errors.push(`CLOSE_AFTER_SECONDS must be ≥ 0 (got ${cfg.closeAfterSeconds}).`);
   }
+  if (
+    !Number.isFinite(cfg.balanceSettleDelayMs) ||
+    cfg.balanceSettleDelayMs < 0 ||
+    cfg.balanceSettleDelayMs > 60000
+  ) {
+    errors.push(`BALANCE_SETTLE_DELAY_MS must be in [0, 60000] (got ${cfg.balanceSettleDelayMs}).`);
+  }
 
   const openaiKey = (process.env.OPENAI_API_KEY ?? "").trim();
   if (openaiKey && !validHttpUrl(cfg.openaiBaseUrl)) {

@@ -4,12 +4,12 @@ import { validateBotEnv } from "./envCheck.js";
 import { PolymarketConnector } from "./connectors/polymarket.js";
 import {
   buy,
-  getAccountBalance,
   getTokenIdsForCondition,
   probeTokenAskBook,
   probeTokenBidBook,
   type PlaceOrderResult
 } from "./connectors/orderExecution.js";
+import { readBalanceUsdc, readSettledBalanceUsdc } from "./connectors/balanceSettle.js";
 import { getWalletWinrates } from "./connectors/walletPerformance.js";
 import { buildFeatures } from "./engine/features.js";
 import { predict } from "./engine/predictor.js";
@@ -145,12 +145,6 @@ async function resolveLiveSellPricing(
   };
 }
 
-const POST_BUY_BALANCE_DELAY_MS = 1000;
-
-function sleepMs(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
 function estimateEntryFeeUsd(notionalUsd: number, feeRateBps: number): number {
   if (notionalUsd <= 0 || feeRateBps <= 0) return 0;
   return roundPrice((notionalUsd * feeRateBps) / 10000);
@@ -256,20 +250,16 @@ async function settleLivePosition(
     );
   }
 
+  const balanceUsdcBeforeExit = await readBalanceUsdc("pre-settle");
   removePosition(pos.marketId);
 
-  let balanceUsdcAtExit: number | undefined;
-  try {
-    balanceUsdcAtExit = (await getAccountBalance()).balanceUsdc;
-  } catch (e: unknown) {
-    const err = e as Error;
-    logger.default.warn(`  balance after settle unavailable: ${err.message ?? String(e)}`);
-  }
+  const balanceUsdcAtExit = await readSettledBalanceUsdc("post-settle");
 
   return finalizeLiveSettle(
     {
       position: pos,
       resolvedYesPrice,
+      balanceUsdcBeforeExit,
       balanceUsdcAtExit,
       eventContext,
       sellPriceLimit: opts?.sellPriceLimit
@@ -344,6 +334,7 @@ async function closeLivePosition(
   }
 
   const { priceLimit, exitQuotePrice } = sellPricing.pricing;
+  const balanceUsdcBeforeExit = await readBalanceUsdc("pre-sell");
   const res = await sell(pos.tokenId, pos.sizeShares, priceLimit, liveOrderOpts);
   if (!res.success) {
     logger.default.error(`  LIVE SELL failed ${pos.marketId}: ${res.errorMsg}`);
@@ -388,13 +379,7 @@ async function closeLivePosition(
 
   removePosition(pos.marketId);
 
-  let balanceUsdcAtExit: number | undefined;
-  try {
-    balanceUsdcAtExit = (await getAccountBalance()).balanceUsdc;
-  } catch (e: unknown) {
-    const err = e as Error;
-    logger.default.warn(`  balance after sell unavailable: ${err.message ?? String(e)}`);
-  }
+  const balanceUsdcAtExit = await readSettledBalanceUsdc("post-sell");
 
   const payload = await finalizeLiveClose(
     {
@@ -402,6 +387,7 @@ async function closeLivePosition(
       exitQuotePrice: quoteForSlippage,
       sellResult: res,
       executionStatus: "EXECUTED",
+      balanceUsdcBeforeExit,
       balanceUsdcAtExit,
       eventContext,
       sellPriceLimit: priceLimit
@@ -727,12 +713,7 @@ async function loop() {
               );
 
               let balanceUsdcAtEntry: number | undefined;
-              try {
-                balanceUsdcAtEntry = (await getAccountBalance()).balanceUsdc;
-              } catch (e: unknown) {
-                const err = e as Error;
-                logger.default.warn(`  balance before buy unavailable: ${err.message ?? String(e)}`);
-              }
+              balanceUsdcAtEntry = await readBalanceUsdc("pre-buy");
 
               const res = await buy(tokenId, cfg.maxPositionUsd, priceLimit, liveOrderOpts);
               if (res.success) {
@@ -755,15 +736,7 @@ async function loop() {
                   const feeRateBps = res.feeRateBps ?? 0;
 
                   let balanceUsdcPostBuy: number | undefined;
-                  await sleepMs(POST_BUY_BALANCE_DELAY_MS);
-                  try {
-                    balanceUsdcPostBuy = (await getAccountBalance()).balanceUsdc;
-                  } catch (e: unknown) {
-                    const err = e as Error;
-                    logger.default.warn(
-                      `  balance after buy unavailable: ${err.message ?? String(e)}`
-                    );
-                  }
+                  balanceUsdcPostBuy = await readSettledBalanceUsdc("post-buy");
 
                   const entryCosts = resolveRealEntryCosts({
                     balanceUsdcAtEntry,
