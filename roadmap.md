@@ -4,6 +4,34 @@ Ideas y trabajo pendiente. Orden sugerido de implementación.
 
 ---
 
+## Falta hacer — Reporter n8n + deploy (post `aef36b6`)
+
+**Hecho en código:** bot solo tradea; `polymarket-reporter` hace poll de `/activity` → `WEBHOOK_URL` → Sheets.
+
+### Ops (droplet / Mac)
+
+- [ ] Actualizar `.env` en droplet: quitar `REPORTING_ASYNC`, `REPORT_SETTLE_DELAY_MS`, `REPORTER_LOOP_SECONDS`; agregar `ACTIVITY_POLL_SECONDS`, `ACTIVITY_POLL_LIMIT`, `ACTIVITY_POLL_SEED_ON_START`, `N8N_SYNC_DELAY_MS`.
+- [ ] `git pull origin dev` + `npm run pm2:deploy` en droplet; verificar **ambos** PM2 online (`polymarket-bot` + `polymarket-reporter`).
+- [ ] Revisar `logs/pm2-reporter-out.log`: seed inicial o `poll: N fetched, 0 new` sin errores.
+- [ ] Confirmar fila nueva en Sheets tras un trade live (esperar ~`ACTIVITY_POLL_SECONDS`).
+- [ ] Backfill histórico si hace falta: `npm run polymarket:sync-n8n` (one-shot; luego el poll incremental).
+
+### n8n (fuera del repo)
+
+- [ ] Workflow acepta payload `N8nMovementPayload` (`movementId`, `tradeLeg`, `type`, `result`, …) — no el JSON viejo con `recordType` / señales.
+- [ ] Dedupe en append por `movementId` (defensa si se pierde `.data/activity-sync-state.json`).
+- [ ] Probar webhook con `npm run polymarket:sync-n8n -- --dry-run` + POST manual de sample.
+
+### Código (mejoras opcionales)
+
+- [ ] `validateReporterEnv()` dedicado (webhook + poll vars) en `src/envCheck.ts`.
+- [ ] Alerta n8n cuando el reporter falla N polls seguidos (hoy solo log en PM2).
+- [ ] Documentar en `DROPLET.md` §7 las vars nuevas del reporter (parcialmente hecho).
+
+**Tradeoff aceptado:** skips (`SIGNAL_SKIP`, `ENTRY_FAK_FAILED`) ya no van a Sheets — solo movimientos reales en `/activity`.
+
+---
+
 ## En progreso / próximo
 
 **Paquete ejecución live (jun 2026)** — prioridad tras logs `dev:single-trade` (FAK kill en YES ~0.56, reintentos en bucle).
@@ -22,9 +50,10 @@ Ideas y trabajo pendiente. Orden sugerido de implementación.
    - [ ] No abrir live si `remainingSec` < umbral (ej. 60 s) — evita FAK contra book vacío.
    - [ ] Opcional: slippage dinámico en precios extremos (`max(ENTRY_SLIPPAGE, quote * 0.05)`).
 
-4. **JSON n8n / Sheets**
+4. **Sheets / n8n (código bot)**
    - [x] Migrado a `N8nMovementPayload` vía Polymarket Data API `/activity` + reporter polling (`src/engine/n8nMovementSync.ts`, `src/reportingLoop.ts`).
    - [x] Bulk backfill: `npm run polymarket:sync-n8n`.
+   - [ ] Ver checklist **Falta hacer — Reporter n8n + deploy** (ops + workflow n8n).
 
 ---
 
@@ -97,12 +126,12 @@ Ideas y trabajo pendiente. Orden sugerido de implementación.
    - [ ] Opcional: `PAUSE_LIVE_ON_LOW_BALANCE=true` para no intentar BUY hasta reinicio manual o depósito.
 
 2. **Límite de pérdida diaria (circuit breaker)**
-   - [ ] Env `MAX_DAILY_LOSS_USD` — acumular `pnlNet` del día desde webhooks o ledger local.
-   - [ ] Si se supera → `pm2:stop` o flag en memoria + webhook `BOT_PAUSED` a n8n.
+   - [ ] Env `MAX_DAILY_LOSS_USD` — acumular PnL del día desde `/activity` o ledger local (`.data/`).
+   - [ ] Si se supera → `pm2:stop` o flag en memoria + evento a n8n (payload custom o fila Sheets).
 
-3. **Alerta n8n / Sheets cuando balance bajo**
-   - [ ] Webhook `BALANCE_LOW` (una vez por sesión o cada X horas) con `balanceUsdc`, `availableUsdc`, `MIN_BALANCE_USD`.
-   - [ ] Opcional: integrar con Telegram/Discord desde n8n.
+3. **Alerta cuando balance bajo**
+   - [ ] Antes de BUY: si `availableUsdc < MIN_BALANCE_USD` → skip + log (ver §1).
+   - [ ] Opcional: POST a n8n con payload `BALANCE_LOW` (workflow aparte del reporter de movimientos).
 
 4. **Documentar en `DROPLET.md`**
    - [ ] Qué hacer si `clob:balance` ≈ 0: parar bot, revisar `.data/open-positions.json`, depositar USDC.
@@ -124,11 +153,13 @@ Ideas y trabajo pendiente. Orden sugerido de implementación.
 
 ## Hecho
 
+- [x] Reporter activity polling → n8n (`src/reportingLoop.ts`, `src/engine/n8nMovementSync.ts`, `src/connectors/accountActivity.ts`); eliminada cola `event-queue` y webhooks ricos del bot.
+- [x] `npm run polymarket:activity`, `polymarket:activity:all`, `polymarket:sync-n8n`.
 - [x] Droplet DigitalOcean + PM2 24/7 (`DROPLET.md`, `scripts/setup-droplet.sh`, `npm run pm2:deploy`).
 - [x] Entrada CLOB best-ask + `ENTRY_BOOK_SLIPPAGE`; salida best-bid + `EXIT_BOOK_SLIPPAGE` / `_URGENT`.
 - [x] Spread guard `ENTRY_BOOK_MAX_SPREAD`; skip `BOOK_TOO_EXPENSIVE`.
 - [x] Partial fill en entrada (`fillShares`/`fillUsd` reales) y en salida (`updatePosition` + retry).
-- [x] Webhooks `EXIT_SKIP`, `NO_BOOK_LIQUIDITY`; `MAX_FAK_BUY_ATTEMPTS=2`; log `OPEN` solo tras BUY OK.
+- [x] `MAX_FAK_BUY_ATTEMPTS=2`; log `OPEN` solo tras BUY OK.
 - [x] Settlement proactivo; fees plausibles en `tradeWebhook.ts`; `sell()` **FAK** (ya no FOK).
 - [x] `@polymarket/clob-client-v2@1.0.6` — órdenes `POLY_1271` (signer=funder).
 - [x] `buy()` FAK, `sell()` FAK; CLOB 400/error → `success: false`.
