@@ -238,11 +238,27 @@ async function finishSingleTrade(payload: ClosedTradePayload): Promise<void> {
   process.exit(0);
 }
 
+function isMarketPastWindowEnd(marketId: string, bufferSec = 2): boolean {
+  const endSec = connector.marketEndSecFromSlug(marketId);
+  if (endSec == null) return false;
+  return Math.floor(Date.now() / 1000) >= endSec + bufferSec;
+}
+
+/** Expired 5m window or rolled to next market — SELL on CLOB is pointless; settle/redeem instead. */
+function shouldSettleWithoutSell(
+  pos: ReturnType<typeof getOpenPositions>[number],
+  currentMarketId: string
+): boolean {
+  if (isMarketPastWindowEnd(pos.marketId)) return true;
+  if (pos.marketId !== currentMarketId && pos.marketId.includes("-5m-")) return true;
+  return false;
+}
+
 async function settleLivePosition(
   pos: ReturnType<typeof getOpenPositions>[number],
   resolvedYesPrice: number | null,
   eventContext: TradeEventContext,
-  opts?: { webhook?: boolean; sellPriceLimit?: number }
+  opts?: { webhook?: boolean; sellPriceLimit?: number; assumeTotalLoss?: boolean }
 ): Promise<ClosedTradePayload> {
   if (resolvedYesPrice == null) {
     logger.default.warn(
@@ -262,7 +278,8 @@ async function settleLivePosition(
       balanceUsdcBeforeExit,
       balanceUsdcAtExit,
       eventContext,
-      sellPriceLimit: opts?.sellPriceLimit
+      sellPriceLimit: opts?.sellPriceLimit,
+      assumeTotalLoss: opts?.assumeTotalLoss
     },
     { webhook: opts?.webhook }
   );
@@ -316,8 +333,68 @@ async function closeLivePosition(
     return payload;
   }
 
+  if (shouldSettleWithoutSell(pos, currentMarketId)) {
+    logger.default.info(
+      `  LIVE SETTLE ${pos.marketId} (window expired — skipping SELL, attempting settle/redeem)`
+    );
+    const settled = await trySettleAfterSellFail(
+      pos,
+      "expired market — no sell liquidity",
+      eventContext,
+      gammaExitQuote,
+      opts
+    );
+    if (settled) {
+      logger.default.info(`  LIVE SETTLE closed ${pos.marketId}`);
+      return settled;
+    }
+    const payload = await settleLivePosition(
+      pos,
+      resolution?.resolvedYesPrice ?? null,
+      eventContext,
+      {
+        webhook: opts?.webhook,
+        sellPriceLimit: gammaExitQuote,
+        assumeTotalLoss: resolution?.resolvedYesPrice == null
+      }
+    );
+    logger.default.info(`  LIVE SETTLE closed ${pos.marketId} (forced cleanup)`);
+    return payload;
+  }
+
   const sellPricing = await resolveLiveSellPricing(pos, gammaExitQuote, opts?.urgent === true);
   if (!sellPricing.ok) {
+    const expiredNoBook =
+      (sellPricing.reason === "no_bids" || sellPricing.reason === "unavailable") &&
+      isMarketPastWindowEnd(pos.marketId);
+    if (expiredNoBook) {
+      logger.default.info(
+        `  LIVE SETTLE ${pos.marketId} (no bids after window end — attempting settle/redeem)`
+      );
+      const settled = await trySettleAfterSellFail(
+        pos,
+        "no bids in book (expired market)",
+        eventContext,
+        gammaExitQuote,
+        opts
+      );
+      if (settled) {
+        logger.default.info(`  LIVE SETTLE closed ${pos.marketId}`);
+        return settled;
+      }
+      const payload = await settleLivePosition(
+        pos,
+        resolution?.resolvedYesPrice ?? null,
+        eventContext,
+        {
+          webhook: opts?.webhook,
+          sellPriceLimit: gammaExitQuote,
+          assumeTotalLoss: resolution?.resolvedYesPrice == null
+        }
+      );
+      logger.default.info(`  LIVE SETTLE closed ${pos.marketId} (forced cleanup)`);
+      return payload;
+    }
     if (sellPricing.reason === "no_bids" && opts?.webhook !== false) {
       await emitSheetsEventOnce(
         `${pos.marketId}:EXIT_SKIP:NO_BIDS`,

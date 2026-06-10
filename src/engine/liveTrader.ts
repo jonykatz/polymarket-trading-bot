@@ -157,6 +157,8 @@ export type LiveSettleInput = {
   eventContext: TradeEventContext;
   /** Omitted for proactive settlement (no sell attempted). */
   sellPriceLimit?: number;
+  /** When resolution is unknown and redeem returned $0 — record total loss and clean up. */
+  assumeTotalLoss?: boolean;
 };
 
 export function buildLiveSettlePayload(input: LiveSettleInput) {
@@ -164,11 +166,13 @@ export function buildLiveSettlePayload(input: LiveSettleInput) {
   const signals = resolveSignals(position);
   const entryPrice = resolveEntryPrice(position);
   const entryPriceReal = resolveEntryPriceReal(position);
-  const pendingSettlement = resolvedYesPrice == null;
+  const pendingSettlement = resolvedYesPrice == null && !input.assumeTotalLoss;
   const exitPriceReal =
-    resolvedYesPrice != null
-      ? roundPrice(position.side === "YES" ? resolvedYesPrice : 1 - resolvedYesPrice)
-      : entryPrice;
+    input.assumeTotalLoss
+      ? 0
+      : resolvedYesPrice != null
+        ? roundPrice(position.side === "YES" ? resolvedYesPrice : 1 - resolvedYesPrice)
+        : entryPrice;
   const exitPrice = exitPriceReal;
   const slippageEntry =
     position.slippageEntry ??
@@ -176,10 +180,14 @@ export function buildLiveSettlePayload(input: LiveSettleInput) {
 
   const sizeUsd = resolveSizeUsd(position);
   const entryCostUsd = roundMoney(position.sizeShares * entryPriceReal || sizeUsd);
-  const exitProceedsUsd = pendingSettlement
-    ? 0
-    : roundMoney(position.sizeShares * exitPriceReal);
-  const pnlGross = pendingSettlement ? 0 : roundMoney(exitProceedsUsd - entryCostUsd);
+  const exitProceedsUsd =
+    pendingSettlement && !input.assumeTotalLoss
+      ? 0
+      : roundMoney(position.sizeShares * exitPriceReal);
+  const pnlGross =
+    pendingSettlement && !input.assumeTotalLoss
+      ? 0
+      : roundMoney(exitProceedsUsd - entryCostUsd);
 
   const feeRateBps = position.feeRateBps ?? 0;
   const wallet = resolveWalletMetrics({
@@ -190,7 +198,9 @@ export function buildLiveSettlePayload(input: LiveSettleInput) {
     balanceUsdcAtExit: input.balanceUsdcAtExit,
     feeRateBps
   });
-  const settlementOutcome = resolveSettlementOutcome(position.side, resolvedYesPrice);
+  const settlementOutcome = input.assumeTotalLoss
+    ? "LOSS"
+    : resolveSettlementOutcome(position.side, resolvedYesPrice);
 
   return buildClosedTradePayload({
     marketId: position.marketId,
