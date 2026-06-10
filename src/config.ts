@@ -51,9 +51,14 @@ export const cfg = {
   closeAfterSeconds: Number(process.env.CLOSE_AFTER_SECONDS ?? 0),
   /** Ms to wait after buy/sell/settle before reading CLOB USDC for fee/PnL snapshots. */
   balanceSettleDelayMs: Number(process.env.BALANCE_SETTLE_DELAY_MS ?? 8000),
-  /** When true (default), live closes/skips enqueue to polymarket-reporter instead of blocking the trading loop. */
-  reportingAsync: envBool(process.env.REPORTING_ASYNC, true),
-  /** Reporter waits this long after a close before reading balance + posting to n8n. */
-  reportSettleDelayMs: Number(process.env.REPORT_SETTLE_DELAY_MS ?? 30000),
-  reporterLoopSeconds: Number(process.env.REPORTER_LOOP_SECONDS ?? 10)
+  /** Activity reporter: poll Polymarket /activity every N seconds. */
+  activityPollSeconds: Number(
+    process.env.ACTIVITY_POLL_SECONDS ?? process.env.REPORTER_LOOP_SECONDS ?? 30
+  ),
+  /** How many latest movements to compare each poll. */
+  activityPollLimit: Number(process.env.ACTIVITY_POLL_LIMIT ?? 5),
+  /** On cold start, mark current movements as known without POST (avoids duplicates after bulk sync). */
+  activityPollSeedOnStart: envBool(process.env.ACTIVITY_POLL_SEED_ON_START, true),
+  /** Delay between n8n POSTs (Sheets quota protection). */
+  n8nSyncDelayMs: Number(process.env.N8N_SYNC_DELAY_MS ?? 4000)
 };

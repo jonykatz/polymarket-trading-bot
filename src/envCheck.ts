@@ -156,18 +156,25 @@ export function validateBotEnv(): void {
     errors.push(`BALANCE_SETTLE_DELAY_MS must be in [0, 60000] (got ${cfg.balanceSettleDelayMs}).`);
   }
   if (
-    !Number.isFinite(cfg.reportSettleDelayMs) ||
-    cfg.reportSettleDelayMs < 0 ||
-    cfg.reportSettleDelayMs > 300000
+    !Number.isFinite(cfg.activityPollSeconds) ||
+    cfg.activityPollSeconds < 5 ||
+    cfg.activityPollSeconds > 3600
   ) {
-    errors.push(`REPORT_SETTLE_DELAY_MS must be in [0, 300000] (got ${cfg.reportSettleDelayMs}).`);
+    errors.push(`ACTIVITY_POLL_SECONDS must be in [5, 3600] (got ${cfg.activityPollSeconds}).`);
   }
   if (
-    !Number.isFinite(cfg.reporterLoopSeconds) ||
-    cfg.reporterLoopSeconds < 1 ||
-    cfg.reporterLoopSeconds > 3600
+    !Number.isFinite(cfg.activityPollLimit) ||
+    cfg.activityPollLimit < 1 ||
+    cfg.activityPollLimit > 100
   ) {
-    errors.push(`REPORTER_LOOP_SECONDS must be in [1, 3600] (got ${cfg.reporterLoopSeconds}).`);
+    errors.push(`ACTIVITY_POLL_LIMIT must be in [1, 100] (got ${cfg.activityPollLimit}).`);
+  }
+  if (
+    !Number.isFinite(cfg.n8nSyncDelayMs) ||
+    cfg.n8nSyncDelayMs < 0 ||
+    cfg.n8nSyncDelayMs > 60000
+  ) {
+    errors.push(`N8N_SYNC_DELAY_MS must be in [0, 60000] (got ${cfg.n8nSyncDelayMs}).`);
   }
 
   const openaiKey = (process.env.OPENAI_API_KEY ?? "").trim();

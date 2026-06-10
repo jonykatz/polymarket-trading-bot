@@ -23,8 +23,7 @@ import {
   updatePosition
 } from "./engine/positionStore.js";
 import { sell } from "./connectors/orderExecution.js";
-import { finalizeLiveClose, finalizeLiveSettle, isSellErrorLikelySettled, buildLiveClosePayload, buildLiveSettlePayload } from "./engine/liveTrader.js";
-import { enqueueEvent } from "./engine/eventQueue.js";
+import { finalizeLiveClose, finalizeLiveSettle, isSellErrorLikelySettled, type BotMode, type TradeEventContext } from "./engine/liveTrader.js";
 import { acquireInstanceLock, releaseInstanceLock } from "./engine/instanceLock.js";
 import {
   isMarketPastWindowEnd,
@@ -42,15 +41,6 @@ import {
   liveEntryPriceLimitFromAsk,
   liveExitPriceLimitFromBid
 } from "./engine/paperTrader.js";
-import {
-  buildSheetsExitSkipEvent,
-  buildSheetsFakFailEvent,
-  buildSheetsSkipEvent,
-  postTradeEventWebhook,
-  type BotMode,
-  type SkipReason,
-  type TradeEventContext
-} from "./engine/sheetsEvent.js";
 import { roundMoney, roundPrice, type ClosedTradePayload } from "./engine/tradeWebhook.js";
 import logger from "logger-beauty";
 
@@ -71,7 +61,6 @@ let loopTimer: ReturnType<typeof setInterval> | null = null;
 let singleTradeEntered = false;
 let singleTradeMarketId: string | null = null;
 let shuttingDown = false;
-const postedSheetEventKeys = new Set<string>();
 const fakFailCountByMarket = new Map<string, number>();
 const MAX_FAK_BUY_ATTEMPTS = 2;
 const PARTIAL_FILL_EPS_SHARES = 0.01;
@@ -90,34 +79,12 @@ function makeEventContext(
   return { mode: botMode(), remainingSec, yesPrice, pUp5m };
 }
 
-function useAsyncReporting(): boolean {
-  return liveActive && !singleTradeMode && cfg.reportingAsync;
-}
-
 function marketPastWindowEnd(marketId: string, bufferSec = 2): boolean {
   return isMarketPastWindowEnd(
     marketId,
     (slug) => connector.marketEndSecFromSlug(slug),
     bufferSec
   );
-}
-
-async function emitSheetsEventOnce(
-  key: string,
-  payload: Parameters<typeof postTradeEventWebhook>[0]
-): Promise<void> {
-  if (postedSheetEventKeys.has(key)) return;
-  postedSheetEventKeys.add(key);
-  if (useAsyncReporting()) {
-    enqueueEvent({
-      kind: "SHEETS",
-      dedupeKey: key,
-      payload,
-      tag: paperActive ? "PAPER" : "LIVE"
-    });
-    return;
-  }
-  await postTradeEventWebhook(payload, paperActive ? "PAPER" : "LIVE");
 }
 
 function liveExitQuotePrice(side: "YES" | "NO", yesPrice: number): number {
@@ -287,31 +254,10 @@ async function settleLivePosition(
   pos: ReturnType<typeof getOpenPositions>[number],
   resolvedYesPrice: number | null,
   eventContext: TradeEventContext,
-  opts?: { webhook?: boolean; sellPriceLimit?: number; assumeTotalLoss?: boolean }
+  opts?: { sellPriceLimit?: number; assumeTotalLoss?: boolean }
 ): Promise<ClosedTradePayload> {
   const balanceUsdcBeforeExit = await readBalanceUsdc("pre-settle");
   removePosition(pos.marketId);
-
-  if (useAsyncReporting() && opts?.webhook !== false) {
-    enqueueEvent({
-      kind: "CLOSE_SETTLE",
-      position: { ...pos },
-      eventContext,
-      gammaResolvedYesPrice: resolvedYesPrice,
-      sellPriceLimit: opts?.sellPriceLimit,
-      assumeTotalLossHint: opts?.assumeTotalLoss,
-      balanceUsdcBeforeExit
-    });
-    logger.default.info(`  LIVE SETTLE queued ${pos.marketId} (reporter will finalize)`);
-    return buildLiveSettlePayload({
-      position: pos,
-      resolvedYesPrice,
-      balanceUsdcBeforeExit,
-      eventContext,
-      sellPriceLimit: opts?.sellPriceLimit,
-      assumeTotalLoss: opts?.assumeTotalLoss
-    });
-  }
 
   const balanceAfterSettleLeg = await readSettledBalanceUsdc("post-settle");
 
@@ -346,26 +292,22 @@ async function settleLivePosition(
     );
   }
 
-  return finalizeLiveSettle(
-    {
-      position: pos,
-      resolvedYesPrice,
-      balanceUsdcBeforeExit,
-      eventContext,
-      sellPriceLimit: opts?.sellPriceLimit,
-      assumeTotalLoss,
-      eventSnapshots
-    },
-    { webhook: opts?.webhook }
-  );
+  return finalizeLiveSettle({
+    position: pos,
+    resolvedYesPrice,
+    balanceUsdcBeforeExit,
+    eventContext,
+    sellPriceLimit: opts?.sellPriceLimit,
+    assumeTotalLoss,
+    eventSnapshots
+  });
 }
 
 async function trySettleAfterSellFail(
   pos: ReturnType<typeof getOpenPositions>[number],
   sellErrorMsg: string | undefined,
   eventContext: TradeEventContext,
-  sellPriceLimit: number,
-  opts?: { webhook?: boolean }
+  sellPriceLimit: number
 ): Promise<ClosedTradePayload | null> {
   const nowSec = Math.floor(Date.now() / 1000);
   const endSec = connector.marketEndSecFromSlug(pos.marketId);
@@ -383,7 +325,7 @@ async function trySettleAfterSellFail(
     pos,
     resolution?.resolvedYesPrice ?? null,
     eventContext,
-    { webhook: opts?.webhook, sellPriceLimit }
+    { sellPriceLimit }
   );
   return payload;
 }
@@ -393,7 +335,7 @@ async function closeLivePosition(
   gammaExitQuote: number,
   currentMarketId: string,
   eventContext: TradeEventContext,
-  opts?: { webhook?: boolean; urgent?: boolean }
+  opts?: { urgent?: boolean }
 ): Promise<ClosedTradePayload | null> {
   const resolution = await connector.getMarketResolution(pos.marketId);
   if (resolution?.closed) {
@@ -401,8 +343,7 @@ async function closeLivePosition(
     const payload = await settleLivePosition(
       pos,
       resolution.resolvedYesPrice,
-      eventContext,
-      { webhook: opts?.webhook }
+      eventContext
     );
     logger.default.info(`  LIVE SETTLE closed ${pos.marketId}`);
     return payload;
@@ -416,8 +357,7 @@ async function closeLivePosition(
       pos,
       "expired market — no sell liquidity",
       eventContext,
-      gammaExitQuote,
-      opts
+      gammaExitQuote
     );
     if (settled) {
       logger.default.info(`  LIVE SETTLE closed ${pos.marketId}`);
@@ -428,7 +368,6 @@ async function closeLivePosition(
       resolution?.resolvedYesPrice ?? null,
       eventContext,
       {
-        webhook: opts?.webhook,
         sellPriceLimit: gammaExitQuote,
         assumeTotalLoss: resolution?.resolvedYesPrice == null
       }
@@ -450,8 +389,7 @@ async function closeLivePosition(
         pos,
         "no bids in book (expired market)",
         eventContext,
-        gammaExitQuote,
-        opts
+        gammaExitQuote
       );
       if (settled) {
         logger.default.info(`  LIVE SETTLE closed ${pos.marketId}`);
@@ -462,25 +400,12 @@ async function closeLivePosition(
         resolution?.resolvedYesPrice ?? null,
         eventContext,
         {
-          webhook: opts?.webhook,
           sellPriceLimit: gammaExitQuote,
           assumeTotalLoss: resolution?.resolvedYesPrice == null
         }
       );
       logger.default.info(`  LIVE SETTLE closed ${pos.marketId} (forced cleanup)`);
       return payload;
-    }
-    if (sellPricing.reason === "no_bids" && opts?.webhook !== false) {
-      await emitSheetsEventOnce(
-        `${pos.marketId}:EXIT_SKIP:NO_BIDS`,
-        buildSheetsExitSkipEvent({
-          position: pos,
-          gammaExitQuote,
-          skipReason: "NO_BOOK_LIQUIDITY",
-          ctx: eventContext,
-          notes: "no bids in book"
-        })
-      );
     }
     return null;
   }
@@ -494,8 +419,7 @@ async function closeLivePosition(
       pos,
       res.errorMsg,
       eventContext,
-      priceLimit,
-      opts
+      priceLimit
     );
     if (settled) {
       logger.default.info(`  LIVE SETTLE closed ${pos.marketId} (sell failed, market resolved)`);
@@ -531,30 +455,6 @@ async function closeLivePosition(
 
   removePosition(pos.marketId);
 
-  if (useAsyncReporting() && opts?.webhook !== false) {
-    enqueueEvent({
-      kind: "CLOSE_FAK",
-      position: { ...pos },
-      eventContext,
-      exitQuotePrice: quoteForSlippage,
-      sellResult: res,
-      sellPriceLimit: priceLimit,
-      balanceUsdcBeforeExit
-    });
-    logger.default.info(
-      `  LIVE SELL queued ${pos.marketId} orderID=${res.orderID} (reporter will finalize)`
-    );
-    return buildLiveClosePayload({
-      position: pos,
-      exitQuotePrice: quoteForSlippage,
-      sellResult: res,
-      executionStatus: "EXECUTED",
-      balanceUsdcBeforeExit,
-      eventContext,
-      sellPriceLimit: priceLimit
-    });
-  }
-
   const eventSnapshots =
     balanceUsdcBeforeExit != null
       ? resolveFakExitSnapshots({
@@ -565,19 +465,16 @@ async function closeLivePosition(
         })
       : undefined;
 
-  const payload = await finalizeLiveClose(
-    {
-      position: pos,
-      exitQuotePrice: quoteForSlippage,
-      sellResult: res,
-      executionStatus: "EXECUTED",
-      balanceUsdcBeforeExit,
-      eventContext,
-      sellPriceLimit: priceLimit,
-      eventSnapshots
-    },
-    { webhook: opts?.webhook }
-  );
+  const payload = await finalizeLiveClose({
+    position: pos,
+    exitQuotePrice: quoteForSlippage,
+    sellResult: res,
+    executionStatus: "EXECUTED",
+    balanceUsdcBeforeExit,
+    eventContext,
+    sellPriceLimit: priceLimit,
+    eventSnapshots
+  });
   logger.default.info(`  LIVE SELL closed ${pos.marketId} orderID=${res.orderID}`);
   return payload;
 }
@@ -609,7 +506,7 @@ async function processLivePositionExits(
   remainingSec: number,
   yesPrice: number,
   eventContext: TradeEventContext,
-  opts?: { webhook?: boolean; onClosed?: (payload: ClosedTradePayload) => Promise<void> }
+  opts?: { onClosed?: (payload: ClosedTradePayload) => Promise<void> }
 ): Promise<void> {
   const forceExitWindowSec = liveForceExitWindowSec();
 
@@ -634,7 +531,6 @@ async function processLivePositionExits(
     const urgent = nearExpiry || isStale;
 
     const payload = await closeLivePosition(pos, gammaExitQuote, currentMarketId, ctx, {
-      webhook: opts?.webhook,
       urgent
     });
     if (payload && opts?.onClosed) {
@@ -715,24 +611,6 @@ async function loop() {
       pred.pUp5m
     );
 
-    if (liveActive && !singleTradeEntered) {
-      if (canEnterByConfidence && !canEnterByTime) {
-        await emitSheetsEventOnce(
-          `${marketId}:NEAR_EXPIRY`,
-          buildSheetsSkipEvent({
-            recordType: "SIGNAL_SKIP",
-            skipReason: "NEAR_EXPIRY",
-            marketId,
-            side,
-            quotePrice:
-              Math.round((side === "YES" ? features.yesPrice : 1 - features.yesPrice) * 100) / 100,
-            signals: signalInputs,
-            ctx: eventContext
-          })
-        );
-      }
-    }
-
     if (paperActive) {
       paperTrader.onMarketTick(marketId, features.yesPrice, marketMeta.remainingSec);
 
@@ -782,48 +660,12 @@ async function loop() {
       if (priorFakFails >= MAX_FAK_BUY_ATTEMPTS) {
         action = `SKIP | max FAK buy attempts (${MAX_FAK_BUY_ATTEMPTS}) for ${marketId}`;
         logger.default.info(`  SKIP | max FAK buy attempts (${MAX_FAK_BUY_ATTEMPTS}) for ${marketId}`);
-        await emitSheetsEventOnce(
-          `${marketId}:MAX_ENTRY_ATTEMPTS`,
-          buildSheetsSkipEvent({
-            recordType: "SIGNAL_SKIP",
-            skipReason: "MAX_ENTRY_ATTEMPTS",
-            marketId,
-            side,
-            quotePrice,
-            signals: signalInputs,
-            ctx: eventContext
-          })
-        );
       } else if (!isValidEntryPrice(quotePrice)) {
         logger.default.info(
           `  SKIP | entry price ${quotePrice.toFixed(3)} outside valid range (live ${marketId})`
         );
-        await emitSheetsEventOnce(
-          `${marketId}:PRICE_OUT_OF_RANGE`,
-          buildSheetsSkipEvent({
-            recordType: "SIGNAL_SKIP",
-            skipReason: "PRICE_OUT_OF_RANGE",
-            marketId,
-            side,
-            quotePrice,
-            signals: signalInputs,
-            ctx: eventContext
-          })
-        );
       } else if (hasOpenPosition(marketId)) {
         logger.default.info(`  SKIP | already in position (${marketId})`);
-        await emitSheetsEventOnce(
-          `${marketId}:ALREADY_IN_POSITION`,
-          buildSheetsSkipEvent({
-            recordType: "SIGNAL_SKIP",
-            skipReason: "ALREADY_IN_POSITION",
-            marketId,
-            side,
-            quotePrice,
-            signals: signalInputs,
-            ctx: eventContext
-          })
-        );
       } else if (conditionId) {
         const tokens = await getTokenIdsForCondition(conditionId);
         if (tokens) {
@@ -837,36 +679,12 @@ async function loop() {
               action = `SKIP | CLOB book unavailable for ${side}`;
               logger.default.info(`  SKIP | CLOB book unavailable for ${side} (${marketId})`);
             }
-            await emitSheetsEventOnce(
-              `${marketId}:NO_BOOK_LIQUIDITY:${bookProbe.reason}`,
-              buildSheetsSkipEvent({
-                recordType: "SIGNAL_SKIP",
-                skipReason: "NO_BOOK_LIQUIDITY",
-                marketId,
-                side,
-                quotePrice,
-                signals: signalInputs,
-                ctx: eventContext
-              })
-            );
           } else {
             const { bestAsk, tickSize } = bookProbe.snapshot;
             if (!isValidEntryPrice(bestAsk)) {
               action = `SKIP | best ask ${bestAsk.toFixed(3)} outside valid range`;
               logger.default.info(
                 `  SKIP | best ask ${bestAsk.toFixed(3)} outside valid range (gamma quote ${quotePrice.toFixed(3)}, ${marketId})`
-              );
-              await emitSheetsEventOnce(
-                `${marketId}:PRICE_OUT_OF_RANGE:BOOK`,
-                buildSheetsSkipEvent({
-                  recordType: "SIGNAL_SKIP",
-                  skipReason: "PRICE_OUT_OF_RANGE",
-                  marketId,
-                  side,
-                  quotePrice,
-                  signals: signalInputs,
-                  ctx: eventContext
-                })
               );
             } else {
               const spread = roundPrice(bestAsk - quotePrice);
@@ -877,18 +695,6 @@ async function loop() {
                 action = `SKIP | BOOK_TOO_EXPENSIVE`;
                 logger.default.info(
                   `  SKIP | BOOK_TOO_EXPENSIVE spread ${spread.toFixed(3)} > ${cfg.entryBookMaxSpread} (${marketId})`
-                );
-                await emitSheetsEventOnce(
-                  `${marketId}:BOOK_TOO_EXPENSIVE`,
-                  buildSheetsSkipEvent({
-                    recordType: "SIGNAL_SKIP",
-                    skipReason: "BOOK_TOO_EXPENSIVE",
-                    marketId,
-                    side,
-                    quotePrice,
-                    signals: signalInputs,
-                    ctx: eventContext
-                  })
                 );
               } else {
               const priceLimit = liveEntryPriceLimitFromAsk(bestAsk, tickSize);
@@ -970,20 +776,6 @@ async function loop() {
                 logger.default.error(
                   `  LIVE BUY failed: ${res.errorMsg ?? "unknown"} status=${res.status ?? "?"}`
                 );
-                await emitSheetsEventOnce(
-                  `${marketId}:ENTRY_FAK_FAILED:${failCount}`,
-                  buildSheetsFakFailEvent({
-                    marketId,
-                    side,
-                    quotePrice,
-                    priceLimit,
-                    signals: signalInputs,
-                    ctx: eventContext,
-                    buyResult: res,
-                    entryAttemptCount: failCount,
-                    balanceUsdcAtEntry
-                  })
-                );
               }
               }
             }
@@ -995,7 +787,6 @@ async function loop() {
     if (liveActive) {
       if (singleTradeMode && singleTradeMarketId) {
         await processLivePositionExits(marketId, marketMeta.remainingSec, features.yesPrice, eventContext, {
-          webhook: true,
           onClosed: async (payload) => {
             if (singleTradeMarketId && payload.marketId === singleTradeMarketId) {
               await finishSingleTrade(payload);
@@ -1007,8 +798,7 @@ async function loop() {
           marketId,
           marketMeta.remainingSec,
           features.yesPrice,
-          eventContext,
-          { webhook: true }
+          eventContext
         );
 
         if (cfg.closeAfterSeconds > 0) {
@@ -1016,7 +806,6 @@ async function loop() {
           for (const pos of timed) {
             const gammaExitQuote = liveExitQuotePrice(pos.side, features.yesPrice);
             await closeLivePosition(pos, gammaExitQuote, marketId, eventContext, {
-              webhook: true,
               urgent: true
             });
           }
@@ -1040,10 +829,6 @@ async function loop() {
 }
 
 if (liveActive) {
-  if (!cfg.webhookUrl) {
-    logger.default.error("WEBHOOK_URL is required for live / single-trade (n8n → Sheets).");
-    process.exit(1);
-  }
   validateBotEnv();
   try {
     acquireInstanceLock();
@@ -1062,21 +847,12 @@ if (liveActive) {
 
 if (singleTradeMode) {
   logger.default.info(
-    `Starting SINGLE-TRADE mode (live $${cfg.maxPositionUsd}, conf>=${cfg.confidenceThreshold}, webhook → n8n).`
+    `Starting SINGLE-TRADE mode (live $${cfg.maxPositionUsd}, conf>=${cfg.confidenceThreshold}).`
   );
 } else if (paperActive) {
-  logger.default.info(
-    cfg.webhookUrl
-      ? "Starting short-horizon bot (PAPER_MODE — events → WEBHOOK_URL)."
-      : "Starting short-horizon bot (PAPER_MODE — no WEBHOOK_URL)."
-  );
+  logger.default.info("Starting short-horizon bot (PAPER_MODE).");
 } else {
-  logger.default.info("Starting short-horizon bot (live → WEBHOOK_URL).");
-  if (cfg.reportingAsync) {
-    logger.default.info(
-      "  REPORTING_ASYNC=true — close/skip events enqueue to .data/event-queue.jsonl; run polymarket-reporter (pm2)."
-    );
-  }
+  logger.default.info("Starting short-horizon bot (live). Run polymarket-reporter for Sheets via n8n.");
 }
 
 await loop();

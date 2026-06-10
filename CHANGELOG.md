@@ -6,6 +6,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+- Changed: `polymarket-reporter` polls Polymarket `/activity` (last `ACTIVITY_POLL_LIMIT` movements), dedupes via `.data/activity-sync-state.json`, POSTs new rows to n8n (`src/reportingLoop.ts`, `src/engine/n8nMovementSync.ts`).
+- Removed: Async event-queue reporter, `sheetsEvent` webhooks from bot, and `polymarket:export-csv` (`src/engine/eventQueue.ts`, `src/engine/sheetsEvent.ts`, `src/polymarketExportCsv.ts`).
+- Added: `npm run polymarket:export-csv` — Google Sheets import CSV, oldest → newest (`src/polymarketExportCsv.ts`); `polymarket:activity` accepts `--asc` / `--desc`.
+- Fixed: `polymarket:sync-n8n` default 4s delay, rate-limit retries, and `--skip` / `--delay-ms` to avoid Google Sheets quota errors on bulk historic sync (`src/polymarketActivitySync.ts`).
+- Added: `npm run polymarket:sync-n8n` — posts full wallet activity history (oldest first) to `WEBHOOK_URL` with sheet fields and `result` on REDEEM exits (`src/polymarketActivitySync.ts`).
+- Changed: `feeUsd` in `--sheet` activity output is always ≤ 0 (negative = cost) (`src/connectors/accountActivity.ts`).
+- Added: `npm run polymarket:activity:all` and `--all` / `--sheet` flags — full paginated wallet history with `movementId`, `tradeLeg`, and `feeUsd` for n8n/Sheets (`src/connectors/accountActivity.ts`, `src/polymarketActivity.ts`).
+- Added: `npm run polymarket:activity` — account movements via Polymarket Data API `/activity`; default terminal table, `--pretty` JSON, `--compact` one-liner (`src/connectors/accountActivity.ts`, `src/polymarketActivity.ts`).
 - Fixed: Reporter and sync close/settle derive `pnlNet`/`balanceUsdcAtExit` from per-trade event snapshots instead of delayed global wallet reads; auto `assumeTotalLoss` on settle without redeem credit; `polymarketFeePct` null when `pnlGross=0` or notional &lt; $0.50 (`src/engine/walletSnapshots.ts`, `src/reportingLoop.ts`, `src/engine/liveTrader.ts`, `src/engine/tradeWebhook.ts`, `src/main.ts`).
 - Added: `src/engine/instanceLock.ts` — live startup acquires `.data/bot-instance.lock` so two PM2/dev processes on the same machine cannot trade the same wallet concurrently.
 - Added: Async reporting architecture — trading loop enqueues close/settle/skip events to `.data/event-queue.jsonl`; `polymarket-reporter` PM2 process waits `REPORT_SETTLE_DELAY_MS`, reads balance/Gamma, posts n8n webhooks (`src/engine/eventQueue.ts`, `src/reportingLoop.ts`, `src/engine/settleAssumptions.ts`, `ecosystem.config.cjs`).

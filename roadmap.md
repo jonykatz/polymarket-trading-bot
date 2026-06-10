@@ -23,10 +23,8 @@ Ideas y trabajo pendiente. Orden sugerido de implementación.
    - [ ] Opcional: slippage dinámico en precios extremos (`max(ENTRY_SLIPPAGE, quote * 0.05)`).
 
 4. **JSON n8n / Sheets**
-   - [x] `recordType`, `exitMethod`, `settlementOutcome`, `exitErrorMsg` en cierres live.
-   - [ ] Campos desglosados: `entryNotionalUsd`, `entryFeeUsd`, `entryCashOutUsd`.
-   - [x] `balanceUsdcAtEntry`, `balanceUsdcAtExit`, `polymarketFeePct` (null si no hay snapshot).
-   - [x] Precios redondeados en payload.
+   - [x] Migrado a `N8nMovementPayload` vía Polymarket Data API `/activity` + reporter polling (`src/engine/n8nMovementSync.ts`, `src/reportingLoop.ts`).
+   - [x] Bulk backfill: `npm run polymarket:sync-n8n`.
 
 ---
 
@@ -109,7 +107,7 @@ Ideas y trabajo pendiente. Orden sugerido de implementación.
 4. **Documentar en `DROPLET.md`**
    - [ ] Qué hacer si `clob:balance` ≈ 0: parar bot, revisar `.data/open-positions.json`, depositar USDC.
 
-**Archivos (estimado):** `src/main.ts`, `src/config.ts`, `src/engine/sheetsEvent.ts`, `src/envCheck.ts`, `.env.example`, `DROPLET.md`
+**Archivos (estimado):** `src/main.ts`, `src/config.ts`, `src/engine/n8nMovementSync.ts`, `src/reportingLoop.ts`, `src/envCheck.ts`, `.env.example`, `DROPLET.md`
 
 ---
 

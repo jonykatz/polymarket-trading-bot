@@ -6,12 +6,6 @@ import {
   defaultPredictionSignals,
   type PredictionSignals
 } from "./tradeWebhook.js";
-import {
-  buildSheetsEventFromClose,
-  postTradeEventWebhook,
-  type TradeEventContext
-} from "./sheetsEvent.js";
-import type { LivePosition } from "../types/index.js";
 
 export type { ClosedTradePayload, ExecutionStatus, PredictionSignals } from "./tradeWebhook.js";
 
@@ -207,48 +201,6 @@ export class PaperTrader {
         `pnlUsd=${pnlUsd.toFixed(2)} cumulativePnlUsd=${this.cumulativePnlUsd.toFixed(2)}`
     );
 
-    void (async () => {
-      const closed = buildClosedTradePayload({
-        marketId: pos.marketId,
-        side: pos.side,
-        entryPrice: pos.entryPrice,
-        exitPrice,
-        entryPriceReal: pos.entryPrice,
-        exitPriceReal: exitPrice,
-        slippageEntry: 0,
-        slippageExit: 0,
-        polymarketFee: 0,
-        sizeUsd: pos.sizeUsd,
-        pnlGross: pnlUsd,
-        signals: pos.signals,
-        executionStatus: "TESTING",
-        recordType: "PAPER_CLOSE",
-        exitMethod: null,
-        settlementOutcome: null,
-        exitErrorMsg: null,
-        timestamp
-      });
-      const paperPosition: LivePosition = {
-        marketId: pos.marketId,
-        conditionId: "",
-        side: pos.side,
-        tokenId: "",
-        sizeShares: shares,
-        openedAt: pos.openedAt,
-        entryPrice: pos.entryPrice,
-        entryPriceReal: pos.entryPrice,
-        sizeUsd: pos.sizeUsd,
-        signals: pos.signals
-      };
-      const ctx: TradeEventContext = {
-        mode: "paper",
-        remainingSec: 0,
-        yesPrice: resolvedYesPrice,
-        pUp5m: resolvedYesPrice
-      };
-      const sheets = buildSheetsEventFromClose(closed, ctx, paperPosition);
-      await postTradeEventWebhook(sheets, "PAPER");
-    })();
   }
 
   listPositions() {

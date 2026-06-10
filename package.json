@@ -20,6 +20,9 @@
     "pm2:delete": "pm2 delete polymarket-bot polymarket-reporter",
     "clob:verify": "tsx src/clobVerify.ts",
     "clob:balance": "tsx src/clobBalance.ts",
+    "polymarket:activity": "tsx src/polymarketActivity.ts",
+    "polymarket:activity:all": "tsx src/polymarketActivity.ts --all --sheet --pretty",
+    "polymarket:sync-n8n": "tsx src/polymarketActivitySync.ts",
     "clob:probe-order": "tsx scripts/clob-order-probe.mjs",
     "binance:verify": "tsx src/binanceVerify.ts"
   },

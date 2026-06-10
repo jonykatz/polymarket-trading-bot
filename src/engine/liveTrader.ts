@@ -11,12 +11,16 @@ import {
   type PredictionSignals,
   type SettlementOutcome
 } from "./tradeWebhook.js";
-import {
-  buildSheetsEventFromClose,
-  postTradeEventWebhook,
-  type TradeEventContext
-} from "./sheetsEvent.js";
 import type { EventExitSnapshots } from "./walletSnapshots.js";
+
+export type BotMode = "single-trade" | "live" | "paper";
+
+export type TradeEventContext = {
+  mode: BotMode;
+  remainingSec: number;
+  yesPrice: number;
+  pUp5m: number;
+};
 
 export type LiveCloseInput = {
   position: LivePosition;
@@ -247,8 +251,7 @@ export function buildLiveSettlePayload(input: LiveSettleInput) {
 }
 
 export async function finalizeLiveSettle(
-  input: LiveSettleInput,
-  opts?: { webhook?: boolean }
+  input: LiveSettleInput
 ): Promise<ReturnType<typeof buildLiveSettlePayload>> {
   const payload = buildLiveSettlePayload(input);
   logger.default.info(
@@ -257,12 +260,6 @@ export async function finalizeLiveSettle(
       `pnlGross=${payload.pnlGross.toFixed(2)} pnlNet=${payload.pnlNet.toFixed(2)} ` +
       `fee=${payload.polymarketFee.toFixed(4)}`
   );
-  if (opts?.webhook !== false) {
-    const sheets = buildSheetsEventFromClose(payload, input.eventContext, input.position, {
-      priceLimit: input.sellPriceLimit
-    });
-    await postTradeEventWebhook(sheets, "LIVE");
-  }
   return payload;
 }
 
@@ -339,8 +336,7 @@ export function buildLiveClosePayload(input: LiveCloseInput) {
 }
 
 export async function finalizeLiveClose(
-  input: LiveCloseInput,
-  opts?: { webhook?: boolean }
+  input: LiveCloseInput
 ): Promise<ReturnType<typeof buildLiveClosePayload>> {
   const payload = buildLiveClosePayload(input);
   logger.default.info(
@@ -348,14 +344,6 @@ export async function finalizeLiveClose(
       `entryReal=${payload.entryPriceReal.toFixed(4)} exitReal=${payload.exitPriceReal.toFixed(4)} ` +
       `pnlGross=${payload.pnlGross.toFixed(2)} pnlNet=${payload.pnlNet.toFixed(2)} fee=${payload.polymarketFee.toFixed(4)}`
   );
-  if (opts?.webhook !== false) {
-    const sheets = buildSheetsEventFromClose(payload, input.eventContext, input.position, {
-      orderId: input.sellResult.orderID,
-      status: input.sellResult.status,
-      priceLimit: input.sellPriceLimit
-    });
-    await postTradeEventWebhook(sheets, "LIVE");
-  }
   return payload;
 }
 

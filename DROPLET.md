@@ -82,10 +82,11 @@ ssh root@188.166.4.44 "tail -50 /root/polymarket-trading-bot/logs/pm2-out.log"
 
 ## 4. Monitoreo sin logs
 
-Los eventos importantes van a **n8n → Sheets** (`WEBHOOK_URL` en `.env`):
+Los trades van a **n8n → Sheets** vía `polymarket-reporter` (`WEBHOOK_URL` en `.env`):
 
-- `SIGNAL_SKIP`, `ENTRY_FAK_FAILED`, `EXIT_SKIP`
-- `OPEN` / compras / `TRADE_CLOSED_*`
+- El **bot** solo ejecuta órdenes en Polymarket.
+- El **reporter** consulta cada `ACTIVITY_POLL_SECONDS` las últimas `ACTIVITY_POLL_LIMIT` operaciones de la API `/activity`, compara `movementId` contra `.data/activity-sync-state.json`, y POSTea solo movimientos nuevos a n8n.
+- Backfill histórico one-shot: `npm run polymarket:sync-n8n`.
 
 Revisá Sheets cuando quieras ver actividad sin SSH.
 

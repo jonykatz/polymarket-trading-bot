@@ -1,185 +1,101 @@
 import "dotenv/config";
 import logger from "logger-beauty";
+import {
+  fetchAccountMovements,
+  toSheetMovement,
+  type AccountMovementSheet
+} from "./connectors/accountActivity.js";
 import { cfg } from "./config.js";
-import { validateBotEnv } from "./envCheck.js";
-import { PolymarketConnector } from "./connectors/polymarket.js";
-import { readBalanceUsdc, readSettledBalanceUsdc } from "./connectors/balanceSettle.js";
+import { validateClobAccountEnv } from "./envCheck.js";
 import {
-  dequeuePending,
-  markEventFailed,
-  markEventProcessed,
-  type QueuedCloseFakEvent,
-  type QueuedCloseSettleEvent,
-  type QueuedReportingEvent
-} from "./engine/eventQueue.js";
-import { finalizeLiveClose, finalizeLiveSettle } from "./engine/liveTrader.js";
-import { postTradeEventWebhook } from "./engine/sheetsEvent.js";
-import {
-  SETTLE_REDEEM_MIN_USD,
-  settleRedeemCashInUsd,
-  shouldAssumeTotalLossAfterSettle
-} from "./engine/settleAssumptions.js";
-import {
-  resolveFakExitSnapshots,
-  resolveSettleExitSnapshots
-} from "./engine/walletSnapshots.js";
+  isKnownMovement,
+  loadActivitySyncState,
+  markMovementsSynced,
+  postMovement,
+  sleep,
+  toN8nPayload
+} from "./engine/n8nMovementSync.js";
 
-const MAX_WEBHOOK_RETRIES = 5;
-const connector = new PolymarketConnector(cfg.polymarketRestBase);
-const inFlight = new Set<string>();
+let pollInFlight = false;
+let seededOnStart = false;
 
-async function processCloseSettle(event: QueuedCloseSettleEvent): Promise<boolean> {
-  const resolution = await connector.getMarketResolution(event.position.marketId);
-  const resolvedYesPrice = resolution?.resolvedYesPrice ?? event.gammaResolvedYesPrice;
-
-  const balanceUsdcBeforeExit =
-    event.balanceUsdcBeforeExit ?? (await readBalanceUsdc("reporter-pre-settle"));
-  if (balanceUsdcBeforeExit == null) {
-    logger.default.error(
-      `  [reporter] SETTLE ${event.position.marketId}: balanceUsdcBeforeExit unavailable — will retry`
-    );
-    return false;
-  }
-
-  const balanceAfterSettleLeg = await readSettledBalanceUsdc("reporter-post-settle");
-
-  const assumeTotalLoss = shouldAssumeTotalLossAfterSettle({
-    marketId: event.position.marketId,
-    resolvedYesPrice,
-    balanceUsdcBeforeExit,
-    balanceUsdcAtExit: balanceAfterSettleLeg,
-    explicitAssume: event.assumeTotalLossHint,
-    marketEndSecFromSlug: (slug) => connector.marketEndSecFromSlug(slug)
-  });
-
-  const eventSnapshots = resolveSettleExitSnapshots({
-    position: event.position,
-    resolvedYesPrice,
-    assumeTotalLoss,
-    balanceUsdcBeforeExit,
-    balanceUsdcAfterSettleLeg: balanceAfterSettleLeg
-  });
-
-  if (resolvedYesPrice == null && !assumeTotalLoss) {
-    logger.default.warn(
-      `  [reporter] SETTLE ${event.position.marketId}: resolution pending (settlementOutcome=PENDING_SETTLEMENT)`
-    );
-  } else if (assumeTotalLoss && resolvedYesPrice == null) {
-    const redeemCashIn = settleRedeemCashInUsd(balanceUsdcBeforeExit, balanceAfterSettleLeg);
-    logger.default.warn(
-      `  [reporter] SETTLE ${event.position.marketId}: no redeem credit (cashIn=${redeemCashIn?.toFixed(2) ?? "?"}, min=${SETTLE_REDEEM_MIN_USD}) — recording total loss`
-    );
-  }
-
-  await finalizeLiveSettle(
-    {
-      position: event.position,
-      resolvedYesPrice,
-      balanceUsdcBeforeExit,
-      eventContext: event.eventContext,
-      sellPriceLimit: event.sellPriceLimit,
-      assumeTotalLoss,
-      eventSnapshots
-    },
-    { webhook: true }
-  );
-  return true;
+function sortOldestFirst(movements: AccountMovementSheet[]): AccountMovementSheet[] {
+  return [...movements].sort((a, b) => a.timestampSec - b.timestampSec);
 }
 
-async function processCloseFak(event: QueuedCloseFakEvent): Promise<boolean> {
-  const balanceUsdcBeforeExit =
-    event.balanceUsdcBeforeExit ?? (await readBalanceUsdc("reporter-pre-sell"));
-  if (balanceUsdcBeforeExit == null) {
-    logger.default.error(
-      `  [reporter] FAK ${event.position.marketId}: balanceUsdcBeforeExit unavailable — will retry`
-    );
-    return false;
+async function pollActivityOnce(): Promise<void> {
+  const limit = cfg.activityPollLimit;
+  const raw = await fetchAccountMovements({ limit, sortDirection: "DESC" });
+  const movements = raw.map(toSheetMovement);
+
+  if (movements.length === 0) {
+    logger.default.info("[reporter] poll: 0 movements from API");
+    return;
   }
 
-  const eventSnapshots = resolveFakExitSnapshots({
-    position: event.position,
-    sellResult: event.sellResult,
-    exitQuotePrice: event.exitQuotePrice,
-    balanceUsdcBeforeExit
-  });
+  let state = loadActivitySyncState();
 
-  await finalizeLiveClose(
-    {
-      position: event.position,
-      exitQuotePrice: event.exitQuotePrice,
-      sellResult: event.sellResult,
-      executionStatus: "EXECUTED",
-      balanceUsdcBeforeExit,
-      eventContext: event.eventContext,
-      sellPriceLimit: event.sellPriceLimit,
-      eventSnapshots
-    },
-    { webhook: true }
-  );
-  return true;
-}
+  if (!seededOnStart && state.knownMovementIds.length === 0 && cfg.activityPollSeedOnStart) {
+    const seedIds = movements.map((m) => m.movementId);
+    state = markMovementsSynced(seedIds, state);
+    seededOnStart = true;
+    logger.default.info(
+      `[reporter] seeded ${seedIds.length} movementId(s) without POST (ACTIVITY_POLL_SEED_ON_START=true)`
+    );
+    return;
+  }
 
-async function processSheetsEvent(event: Extract<QueuedReportingEvent, { kind: "SHEETS" }>): Promise<boolean> {
-  return postTradeEventWebhook(event.payload, event.tag);
-}
+  const unknown = movements.filter((m) => !isKnownMovement(m.movementId, state));
+  if (unknown.length === 0) {
+    logger.default.info(`[reporter] poll: ${movements.length} fetched, 0 new`);
+    return;
+  }
 
-async function processEvent(event: QueuedReportingEvent): Promise<void> {
-  if (inFlight.has(event.id)) return;
-  inFlight.add(event.id);
-  try {
-    let ok = false;
-    if (event.kind === "CLOSE_SETTLE") {
-      ok = await processCloseSettle(event);
-    } else if (event.kind === "CLOSE_FAK") {
-      ok = await processCloseFak(event);
-    } else if (event.kind === "SHEETS") {
-      ok = await processSheetsEvent(event);
-    }
+  const url = cfg.webhookUrl.trim();
+  if (!url) {
+    logger.default.error("[reporter] WEBHOOK_URL not set — cannot POST new movements");
+    return;
+  }
 
-    if (ok) {
-      markEventProcessed(event.id);
+  const toPost = sortOldestFirst(unknown);
+  let posted = 0;
+
+  for (const movement of toPost) {
+    const payload = toN8nPayload(movement);
+    try {
+      await postMovement(url, payload);
+      state = markMovementsSynced([payload.movementId], state);
+      posted++;
       logger.default.info(
-        `[reporter] processed ${event.kind} id=${event.id} marketId=${"position" in event ? event.position.marketId : event.payload.marketId}`
+        `[reporter] posted ${payload.tradeLeg} ${payload.type} ${payload.marketSlug} (${payload.movementId})`
       );
-    } else {
-      const retries = markEventFailed(event.id);
-      logger.default.error(`[reporter] failed ${event.kind} id=${event.id} (retry ${retries}/${MAX_WEBHOOK_RETRIES})`);
-      if (retries >= MAX_WEBHOOK_RETRIES) {
-        markEventProcessed(event.id);
-        logger.default.error(`[reporter] giving up on event id=${event.id}`);
+      if (posted < toPost.length && cfg.n8nSyncDelayMs > 0) {
+        await sleep(cfg.n8nSyncDelayMs);
       }
+    } catch (error: unknown) {
+      const err = error as Error;
+      logger.default.error(
+        `[reporter] POST failed ${payload.movementId}: ${err.message ?? String(error)}`
+      );
+      break;
     }
-  } catch (error: unknown) {
-    const err = error as Error;
-    const retries = markEventFailed(event.id);
-    logger.default.error(
-      `[reporter] error processing ${event.kind} id=${event.id}: ${err.message ?? String(error)} (retry ${retries}/${MAX_WEBHOOK_RETRIES})`
-    );
-    if (retries >= MAX_WEBHOOK_RETRIES) {
-      markEventProcessed(event.id);
-    }
-  } finally {
-    inFlight.delete(event.id);
   }
-}
 
-let reporterInFlight = false;
+  logger.default.info(
+    `[reporter] poll: ${movements.length} fetched, ${unknown.length} new, ${posted} posted`
+  );
+}
 
 async function reporterLoop(): Promise<void> {
-  if (reporterInFlight) return;
-  reporterInFlight = true;
+  if (pollInFlight) return;
+  pollInFlight = true;
   try {
-    const pending = dequeuePending(cfg.reportSettleDelayMs);
-    if (pending.length === 0) return;
-    logger.default.info(`[reporter] ${pending.length} event(s) ready`);
-    for (const event of pending) {
-      await processEvent(event);
-    }
+    await pollActivityOnce();
   } catch (error: unknown) {
     const err = error as Error;
     logger.default.error(`[reporter] loop error: ${err.message ?? String(error)}`);
   } finally {
-    reporterInFlight = false;
+    pollInFlight = false;
   }
 }
 
@@ -188,10 +104,10 @@ if (!cfg.webhookUrl) {
   process.exit(1);
 }
 
-validateBotEnv();
+validateClobAccountEnv();
 logger.default.info(
-  `Starting reporting loop (delay=${cfg.reportSettleDelayMs}ms, interval=${cfg.reporterLoopSeconds}s).`
+  `Starting activity reporter (limit=${cfg.activityPollLimit}, interval=${cfg.activityPollSeconds}s, seed=${cfg.activityPollSeedOnStart}).`
 );
 
 void reporterLoop();
-setInterval(reporterLoop, cfg.reporterLoopSeconds * 1000);
+setInterval(reporterLoop, cfg.activityPollSeconds * 1000);

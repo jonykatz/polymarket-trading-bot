@@ -1,6 +1,6 @@
 const path = require("path");
 
-/** pm2: live bot + async reporter — `npm run pm2:start` */
+/** pm2: live bot + activity reporter — `npm run pm2:start` */
 module.exports = {
   apps: [
     {
