@@ -18,9 +18,9 @@ Ideas y trabajo pendiente. Orden sugerido de implementación.
 
 ### n8n (fuera del repo)
 
-- [ ] Workflow acepta payload `N8nMovementPayload` (`movementId`, `tradeLeg`, `type`, `result`, …) — no el JSON viejo con `recordType` / señales.
-- [ ] Dedupe en append por `movementId` (defensa si se pierde `.data/activity-sync-state.json`).
-- [ ] Probar webhook con `npm run polymarket:sync-n8n -- --dry-run` + POST manual de sample.
+- [x] Workflow **Ioni Bot dev** acepta `N8nMovementPayload` (`movementId`, `tradeLeg`, `type`, `result`, …) — pestaña `Backtest Prod`.
+- [x] Dedupe por `movementId`: `appendOrUpdate` en **Ioni Bot dev** (`workflows/ioni-bot-dev.json` en n8n-builder; lookup roto en n8n 2.16).
+- [x] Backfill probado: `npm run polymarket:sync-n8n` — 167 movimientos POST OK (jun 2026).
 
 ### Código (mejoras opcionales)
 
