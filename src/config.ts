@@ -24,7 +24,14 @@ export const cfg = {
   entryBookMaxSpread: Number(process.env.ENTRY_BOOK_MAX_SPREAD ?? 0.08),
   exitBookSlippage: Number(process.env.EXIT_BOOK_SLIPPAGE ?? 0.02),
   exitBookSlippageUrgent: Number(process.env.EXIT_BOOK_SLIPPAGE_URGENT ?? 0.05),
-  forceExitSeconds: Number(process.env.FORCE_EXIT_SECONDS ?? 3),
+  /** Min seconds left in the 5m window before allowing a new live entry. */
+  minRemainingSecEntry: Number(process.env.MIN_REMAINING_SEC_ENTRY ?? 60),
+  /** Sell when (mark − entry) / (1 − entry) ≥ this (e.g. 0.70 = 70% of max gain). */
+  takeProfitPctOfMax: Number(process.env.TAKE_PROFIT_PCT_OF_MAX ?? 0.7),
+  /** Sell when mark ≤ entry × (1 − this), e.g. 0.25 = 25% below entry. */
+  stopLossPct: Number(process.env.STOP_LOSS_PCT ?? 0.25),
+  /** Near expiry: force sell losers only when remainingSec ≤ this (+ loop interval). */
+  forceExitSeconds: Number(process.env.FORCE_EXIT_SECONDS ?? 45),
   emaFast: Number(process.env.EMA_FAST ?? 5),
   emaSlow: Number(process.env.EMA_SLOW ?? 13),
   rsiPeriod: Number(process.env.RSI_PERIOD ?? 14),

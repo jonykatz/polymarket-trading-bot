@@ -6,7 +6,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
-- Changed: `polymarket-reporter` polls Polymarket `/activity` (last `ACTIVITY_POLL_LIMIT` movements), dedupes via `.data/activity-sync-state.json`, POSTs new rows to n8n (`src/reportingLoop.ts`, `src/engine/n8nMovementSync.ts`).
+- Added: Asymmetric live exit — `MIN_REMAINING_SEC_ENTRY`, `TAKE_PROFIT_PCT_OF_MAX`, `STOP_LOSS_PCT`; take profit / stop loss / loser-only force exit; winners hold for settlement (`src/engine/exitStrategy.ts`, `src/main.ts`, `src/config.ts`).
 - Removed: Async event-queue reporter, `sheetsEvent` webhooks from bot, and `polymarket:export-csv` (`src/engine/eventQueue.ts`, `src/engine/sheetsEvent.ts`, `src/polymarketExportCsv.ts`).
 - Added: `npm run polymarket:export-csv` — Google Sheets import CSV, oldest → newest (`src/polymarketExportCsv.ts`); `polymarket:activity` accepts `--asc` / `--desc`.
 - Fixed: `polymarket:sync-n8n` default 4s delay, rate-limit retries, and `--skip` / `--delay-ms` to avoid Google Sheets quota errors on bulk historic sync (`src/polymarketActivitySync.ts`).

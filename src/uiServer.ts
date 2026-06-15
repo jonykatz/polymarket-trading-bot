@@ -9,6 +9,7 @@ import { getWalletWinrates } from "./connectors/walletPerformance.js";
 
 validateUiEnv();
 import { buildFeatures } from "./engine/features.js";
+import { canEnterByRemainingSec } from "./engine/exitStrategy.js";
 import { predict } from "./engine/predictor.js";
 import { LlmScorer } from "./models/llmScorer.js";
 
@@ -44,8 +45,11 @@ async function getSnapshot() {
   const gate = {
     confidenceThreshold: cfg.confidenceThreshold,
     passConfidence: pred.confidence >= cfg.confidenceThreshold,
+    minRemainingSecEntry: cfg.minRemainingSecEntry,
+    passTime: canEnterByRemainingSec(marketMeta.remainingSec),
+    takeProfitPctOfMax: cfg.takeProfitPctOfMax,
+    stopLossPct: cfg.stopLossPct,
     forceExitSeconds: cfg.forceExitSeconds,
-    passTime: marketMeta.remainingSec < 0 || marketMeta.remainingSec > cfg.forceExitSeconds + 5,
     whaleMinWinrate: cfg.whaleMinWinrate
   };
   return {

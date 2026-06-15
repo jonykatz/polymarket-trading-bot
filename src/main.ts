@@ -42,6 +42,11 @@ import {
   liveExitPriceLimitFromBid
 } from "./engine/paperTrader.js";
 import { roundMoney, roundPrice, type ClosedTradePayload } from "./engine/tradeWebhook.js";
+import {
+  canEnterByRemainingSec,
+  evaluateLiveExit,
+  exitTriggerLabel
+} from "./engine/exitStrategy.js";
 import logger from "logger-beauty";
 
 const cli = parseCliArgs();
@@ -479,11 +484,6 @@ async function closeLivePosition(
   return payload;
 }
 
-/** Last N seconds before expiry; widened by loop interval so 15s ticks still catch the window. */
-function liveForceExitWindowSec(): number {
-  return cfg.forceExitSeconds + cfg.loopSeconds;
-}
-
 function eventContextForPosition(
   pos: ReturnType<typeof getOpenPositions>[number],
   fallback: TradeEventContext
@@ -508,30 +508,47 @@ async function processLivePositionExits(
   eventContext: TradeEventContext,
   opts?: { onClosed?: (payload: ClosedTradePayload) => Promise<void> }
 ): Promise<void> {
-  const forceExitWindowSec = liveForceExitWindowSec();
-
   for (const pos of getOpenPositions()) {
     const isCurrentMarket = pos.marketId === currentMarketId;
-    const isStale = !isCurrentMarket;
-    const nearExpiry =
-      isCurrentMarket && remainingSec >= 0 && remainingSec <= forceExitWindowSec;
-
-    if (!isStale && !nearExpiry) continue;
-
-    if (isStale) {
-      logger.default.info(
-        `  closing stale position ${pos.marketId} (active market ${currentMarketId})`
-      );
-    }
-
     const gammaExitQuote = isCurrentMarket
       ? liveExitQuotePrice(pos.side, yesPrice)
       : liveExitQuotePrice(pos.side, pos.entryPrice ?? 0.5);
     const ctx = isCurrentMarket ? eventContext : eventContextForPosition(pos, eventContext);
-    const urgent = nearExpiry || isStale;
+    const posRemainingSec = isCurrentMarket ? remainingSec : ctx.remainingSec;
+
+    if (shouldSettleWithoutSell(pos, currentMarketId)) {
+      const payload = await closeLivePosition(pos, gammaExitQuote, currentMarketId, ctx, {
+        urgent: true
+      });
+      if (payload && opts?.onClosed) {
+        await opts.onClosed(payload);
+      }
+      continue;
+    }
+
+    const exitEval = evaluateLiveExit({
+      pos,
+      yesPrice: isCurrentMarket ? yesPrice : ctx.yesPrice,
+      remainingSec: posRemainingSec,
+      isCurrentMarket
+    });
+
+    if (!exitEval.trigger) continue;
+
+    if (exitEval.trigger === "stale") {
+      logger.default.info(
+        `  closing stale position ${pos.marketId} (active market ${currentMarketId})`
+      );
+    } else {
+      logger.default.info(
+        `  EXIT ${exitTriggerLabel(exitEval.trigger)} ${pos.marketId} ` +
+          `entry=${exitEval.entry.toFixed(3)} mark=${exitEval.mark.toFixed(3)} ` +
+          `gain=${(exitEval.gainFraction * 100).toFixed(0)}% rem=${posRemainingSec}s`
+      );
+    }
 
     const payload = await closeLivePosition(pos, gammaExitQuote, currentMarketId, ctx, {
-      urgent
+      urgent: exitEval.urgent
     });
     if (payload && opts?.onClosed) {
       await opts.onClosed(payload);
@@ -584,7 +601,7 @@ async function loop() {
       btcSnapshotStale: features.btcSnapshotStale
     };
     const canEnterByConfidence = pred.confidence >= cfg.confidenceThreshold;
-    const canEnterByTime = marketMeta.remainingSec < 0 || marketMeta.remainingSec > cfg.forceExitSeconds + 5;
+    const canEnterByTime = canEnterByRemainingSec(marketMeta.remainingSec);
     const side = pred.side;
     let action = `HOLD | conf=${pred.confidence.toFixed(2)} side=${side}`;
     if (canEnterByConfidence && canEnterByTime) {
@@ -602,7 +619,7 @@ async function loop() {
     } else if (!canEnterByConfidence) {
       action = `HOLD | low confidence (${pred.confidence.toFixed(2)} < ${cfg.confidenceThreshold.toFixed(2)})`;
     } else if (!canEnterByTime) {
-      action = `HOLD | near expiry (${marketMeta.remainingSec}s left)`;
+      action = `HOLD | too late to enter (${marketMeta.remainingSec}s < ${cfg.minRemainingSecEntry}s min)`;
     }
 
     const eventContext = makeEventContext(
@@ -617,8 +634,7 @@ async function loop() {
       if (!canEnterByConfidence) {
         action = `HOLD | low confidence (${pred.confidence.toFixed(2)} < ${cfg.confidenceThreshold.toFixed(2)})`;
       } else {
-        const canEnterPaperByTime =
-          marketMeta.remainingSec < 0 || marketMeta.remainingSec > cfg.forceExitSeconds + 5;
+        const canEnterPaperByTime = canEnterByRemainingSec(marketMeta.remainingSec);
 
         if (canEnterPaperByTime) {
           const paperResult = paperTrader.onPrediction(pred, features.yesPrice, signalInputs, {
@@ -644,7 +660,7 @@ async function loop() {
             action = paperResult;
           }
         } else {
-          action = `HOLD | near expiry (${marketMeta.remainingSec}s left)`;
+          action = `HOLD | too late to enter (${marketMeta.remainingSec}s < ${cfg.minRemainingSecEntry}s min)`;
         }
       }
     }

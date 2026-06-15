@@ -115,6 +115,23 @@ export function validateBotEnv(): void {
   ) {
     errors.push(`EXIT_BOOK_SLIPPAGE_URGENT must be in [0, 0.5] (got ${cfg.exitBookSlippageUrgent}).`);
   }
+  if (
+    !Number.isFinite(cfg.minRemainingSecEntry) ||
+    cfg.minRemainingSecEntry < 15 ||
+    cfg.minRemainingSecEntry > 280
+  ) {
+    errors.push(`MIN_REMAINING_SEC_ENTRY must be in [15, 280] (got ${cfg.minRemainingSecEntry}).`);
+  }
+  if (
+    !Number.isFinite(cfg.takeProfitPctOfMax) ||
+    cfg.takeProfitPctOfMax <= 0 ||
+    cfg.takeProfitPctOfMax > 1
+  ) {
+    errors.push(`TAKE_PROFIT_PCT_OF_MAX must be in (0, 1] (got ${cfg.takeProfitPctOfMax}).`);
+  }
+  if (!Number.isFinite(cfg.stopLossPct) || cfg.stopLossPct <= 0 || cfg.stopLossPct >= 1) {
+    errors.push(`STOP_LOSS_PCT must be in (0, 1) (got ${cfg.stopLossPct}).`);
+  }
   if (!Number.isFinite(cfg.forceExitSeconds) || cfg.forceExitSeconds < 1 || cfg.forceExitSeconds >= 120) {
     errors.push(`FORCE_EXIT_SECONDS must be in [1, 119] (got ${cfg.forceExitSeconds}).`);
   }
