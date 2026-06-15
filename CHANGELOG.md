@@ -6,7 +6,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
-- Added: Live position reconcile against Data API `/positions` on startup and every `POSITION_RECONCILE_SECONDS` (`src/engine/positionReconcile.ts`, `src/main.ts`).
+- Fixed: Skip take profit / stop loss / force exit until `MIN_POSITION_AGE_MS` after BUY so CLOB tokens can settle (`src/engine/exitStrategy.ts`).
 - Added: `npm run polymarket:positions` spike CLI for Data API `/positions` (`src/polymarketPositions.ts`, `src/connectors/accountPositions.ts`).
 - Added: `docs/polymarket-apis.md` — Gamma, Data, CLOB, Bridge, and WebSocket reference with bot usage map and exploration backlog.
 - Added: Asymmetric live exit — `MIN_REMAINING_SEC_ENTRY`, `TAKE_PROFIT_PCT_OF_MAX`, `STOP_LOSS_PCT`; take profit / stop loss / loser-only force exit; winners hold for settlement (`src/engine/exitStrategy.ts`, `src/main.ts`, `src/config.ts`).

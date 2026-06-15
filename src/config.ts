@@ -32,6 +32,8 @@ export const cfg = {
   stopLossPct: Number(process.env.STOP_LOSS_PCT ?? 0.25),
   /** Near expiry: force sell losers only when remainingSec ≤ this (+ loop interval). */
   forceExitSeconds: Number(process.env.FORCE_EXIT_SECONDS ?? 45),
+  /** Min ms after BUY before take profit / stop loss / force exit (tokens must settle). */
+  minPositionAgeMs: Number(process.env.MIN_POSITION_AGE_MS ?? 30000),
   emaFast: Number(process.env.EMA_FAST ?? 5),
   emaSlow: Number(process.env.EMA_SLOW ?? 13),
   rsiPeriod: Number(process.env.RSI_PERIOD ?? 14),

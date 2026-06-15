@@ -135,6 +135,13 @@ export function validateBotEnv(): void {
   if (!Number.isFinite(cfg.forceExitSeconds) || cfg.forceExitSeconds < 1 || cfg.forceExitSeconds >= 120) {
     errors.push(`FORCE_EXIT_SECONDS must be in [1, 119] (got ${cfg.forceExitSeconds}).`);
   }
+  if (
+    !Number.isFinite(cfg.minPositionAgeMs) ||
+    cfg.minPositionAgeMs < 0 ||
+    cfg.minPositionAgeMs > 600000
+  ) {
+    errors.push(`MIN_POSITION_AGE_MS must be in [0, 600000] (got ${cfg.minPositionAgeMs}).`);
+  }
   if (!Number.isFinite(cfg.emaFast) || !Number.isInteger(cfg.emaFast) || cfg.emaFast < 2 || cfg.emaFast > 100) {
     errors.push(`EMA_FAST must be an integer in [2, 100] (got ${cfg.emaFast}).`);
   }

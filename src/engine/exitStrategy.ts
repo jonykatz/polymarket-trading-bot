@@ -75,6 +75,13 @@ export function evaluateLiveExit(input: {
     return { trigger: null, urgent: false, entry, mark, gainFraction };
   }
 
+  if (
+    cfg.minPositionAgeMs > 0 &&
+    Date.now() - pos.openedAt < cfg.minPositionAgeMs
+  ) {
+    return { trigger: null, urgent: false, entry, mark, gainFraction };
+  }
+
   if (gainFraction >= cfg.takeProfitPctOfMax) {
     return { trigger: "take_profit", urgent: false, entry, mark, gainFraction };
   }
