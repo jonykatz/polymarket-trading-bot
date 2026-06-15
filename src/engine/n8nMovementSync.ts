@@ -51,19 +51,78 @@ export function formatSyncedAtArgentina(): string {
   }).format(new Date());
 }
 
-export function inferResult(movement: AccountMovementSheet): "" | "WIN" | "LOSS" {
+function movementMarketKey(
+  movement: Pick<AccountMovementSheet, "marketSlug" | "eventSlug">
+): string {
+  return (movement.eventSlug || movement.marketSlug || "").trim();
+}
+
+function totalEntryCostUsd(entry: AccountMovementSheet): number {
+  return Math.abs(entry.cashFlowUsd) + Math.abs(entry.feeUsd ?? 0);
+}
+
+function netExitProceedsUsd(exit: AccountMovementSheet): number {
+  return exit.cashFlowUsd + (exit.feeUsd ?? 0);
+}
+
+/** Most recent ENTRY for same market/outcome before this EXIT. */
+export function findMatchingEntry(
+  exit: AccountMovementSheet,
+  context: AccountMovementSheet[]
+): AccountMovementSheet | null {
+  const market = movementMarketKey(exit);
+  if (!market) return null;
+
+  let best: AccountMovementSheet | null = null;
+  for (const row of context) {
+    if (row.tradeLeg !== "ENTRY") continue;
+    if (movementMarketKey(row) !== market) continue;
+    if (exit.outcome && row.outcome && exit.outcome !== row.outcome) continue;
+    if (row.timestampSec > exit.timestampSec) continue;
+    if (!best || row.timestampSec > best.timestampSec) best = row;
+  }
+  return best;
+}
+
+export function inferSellResult(
+  exit: AccountMovementSheet,
+  entry: AccountMovementSheet
+): "WIN" | "LOSS" {
+  if (entry.shares <= 0 || exit.shares <= 0) return "LOSS";
+  const costForSoldShares = (totalEntryCostUsd(entry) / entry.shares) * exit.shares;
+  const net = netExitProceedsUsd(exit);
+  return net >= costForSoldShares ? "WIN" : "LOSS";
+}
+
+export function inferResult(
+  movement: AccountMovementSheet,
+  context: AccountMovementSheet[] = []
+): "" | "WIN" | "LOSS" {
   if (movement.tradeLeg !== "EXIT") return "";
+
   if (movement.type === "REDEEM") {
     return movement.cashFlowUsd > 0 ? "WIN" : "LOSS";
   }
+
+  if (movement.type === "TRADE" && movement.side === "SELL") {
+    const entry = findMatchingEntry(movement, context);
+    if (entry) return inferSellResult(movement, entry);
+    return "";
+  }
+
   return "";
 }
 
-export function toN8nPayload(movement: AccountMovementSheet, syncedAt?: string): N8nMovementPayload {
+export function toN8nPayload(
+  movement: AccountMovementSheet,
+  syncedAt?: string,
+  context: AccountMovementSheet[] = []
+): N8nMovementPayload {
+  const marketSlug = movementMarketKey(movement) || movement.marketSlug;
   return {
     movementId: movement.movementId,
     timestamp: movement.timestamp,
-    marketSlug: movement.marketSlug,
+    marketSlug,
     tradeLeg: movement.tradeLeg,
     type: movement.type,
     side: movement.side,
@@ -73,7 +132,7 @@ export function toN8nPayload(movement: AccountMovementSheet, syncedAt?: string):
     cashFlowUsd: movement.cashFlowUsd,
     feeUsd: movement.feeUsd,
     transactionHash: movement.transactionHash,
-    result: inferResult(movement),
+    result: inferResult(movement, context),
     syncedAt: syncedAt ?? formatSyncedAtArgentina()
   };
 }

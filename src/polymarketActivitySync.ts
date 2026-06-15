@@ -78,7 +78,7 @@ async function main(): Promise<void> {
 
   let ok = 0;
   for (const movement of batch) {
-    const payload = toN8nPayload(movement);
+    const payload = toN8nPayload(movement, undefined, batch);
     try {
       await postMovement(url, payload);
       markMovementSynced(payload.movementId);

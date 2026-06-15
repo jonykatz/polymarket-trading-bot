@@ -61,7 +61,7 @@ async function pollActivityOnce(): Promise<void> {
   let posted = 0;
 
   for (const movement of toPost) {
-    const payload = toN8nPayload(movement);
+    const payload = toN8nPayload(movement, undefined, movements);
     try {
       await postMovement(url, payload);
       state = markMovementsSynced([payload.movementId], state);

@@ -6,6 +6,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+- Fixed: Infer WIN/LOSS on EXIT SELL rows in Sheets reporter by pairing with matching ENTRY (`src/engine/n8nMovementSync.ts`).
 - Fixed: Skip take profit / stop loss / force exit until `MIN_POSITION_AGE_MS` after BUY so CLOB tokens can settle (`src/engine/exitStrategy.ts`).
 - Added: `npm run polymarket:positions` spike CLI for Data API `/positions` (`src/polymarketPositions.ts`, `src/connectors/accountPositions.ts`).
 - Added: `docs/polymarket-apis.md` — Gamma, Data, CLOB, Bridge, and WebSocket reference with bot usage map and exploration backlog.
