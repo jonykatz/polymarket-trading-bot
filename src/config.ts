@@ -67,5 +67,12 @@ export const cfg = {
   /** On cold start, mark current movements as known without POST (avoids duplicates after bulk sync). */
   activityPollSeedOnStart: envBool(process.env.ACTIVITY_POLL_SEED_ON_START, true),
   /** Delay between n8n POSTs (Sheets quota protection). */
-  n8nSyncDelayMs: Number(process.env.N8N_SYNC_DELAY_MS ?? 4000)
+  n8nSyncDelayMs: Number(process.env.N8N_SYNC_DELAY_MS ?? 4000),
+  /** Reconcile open-positions.json against Data API /positions. */
+  positionReconcileEnabled: envBool(process.env.POSITION_RECONCILE_ENABLED, true),
+  positionReconcileSeconds: Number(process.env.POSITION_RECONCILE_SECONDS ?? 120),
+  /** Min share drift before updatePosition during reconcile. */
+  positionSizeEps: Number(process.env.POSITION_SIZE_EPS ?? 0.05),
+  /** API sizeThreshold query param when fetching /positions. */
+  positionReconcileSizeThreshold: Number(process.env.POSITION_RECONCILE_SIZE_THRESHOLD ?? 0.01)
 };

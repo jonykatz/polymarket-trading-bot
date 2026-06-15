@@ -193,6 +193,25 @@ export function validateBotEnv(): void {
   ) {
     errors.push(`N8N_SYNC_DELAY_MS must be in [0, 60000] (got ${cfg.n8nSyncDelayMs}).`);
   }
+  if (
+    !Number.isFinite(cfg.positionReconcileSeconds) ||
+    cfg.positionReconcileSeconds < 30 ||
+    cfg.positionReconcileSeconds > 3600
+  ) {
+    errors.push(`POSITION_RECONCILE_SECONDS must be in [30, 3600] (got ${cfg.positionReconcileSeconds}).`);
+  }
+  if (!Number.isFinite(cfg.positionSizeEps) || cfg.positionSizeEps < 0 || cfg.positionSizeEps > 10) {
+    errors.push(`POSITION_SIZE_EPS must be in [0, 10] (got ${cfg.positionSizeEps}).`);
+  }
+  if (
+    !Number.isFinite(cfg.positionReconcileSizeThreshold) ||
+    cfg.positionReconcileSizeThreshold < 0 ||
+    cfg.positionReconcileSizeThreshold > 100
+  ) {
+    errors.push(
+      `POSITION_RECONCILE_SIZE_THRESHOLD must be in [0, 100] (got ${cfg.positionReconcileSizeThreshold}).`
+    );
+  }
 
   const openaiKey = (process.env.OPENAI_API_KEY ?? "").trim();
   if (openaiKey && !validHttpUrl(cfg.openaiBaseUrl)) {

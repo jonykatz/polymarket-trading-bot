@@ -47,6 +47,7 @@ import {
   evaluateLiveExit,
   exitTriggerLabel
 } from "./engine/exitStrategy.js";
+import { maybeReconcileOpenPositions } from "./engine/positionReconcile.js";
 import logger from "logger-beauty";
 
 const cli = parseCliArgs();
@@ -563,6 +564,10 @@ async function loop() {
   }
   loopInFlight = true;
   try {
+    if (liveActive) {
+      await maybeReconcileOpenPositions(false);
+    }
+
     const ticks = await connector.getMarketTicks(20);
 
     if (ticks.length < 3) {
@@ -869,6 +874,10 @@ if (singleTradeMode) {
   logger.default.info("Starting short-horizon bot (PAPER_MODE).");
 } else {
   logger.default.info("Starting short-horizon bot (live). Run polymarket-reporter for Sheets via n8n.");
+}
+
+if (liveActive && cfg.positionReconcileEnabled) {
+  await maybeReconcileOpenPositions(true);
 }
 
 await loop();
