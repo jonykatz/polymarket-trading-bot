@@ -6,6 +6,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+- Changed: When `MAKER_ENABLED=true`, main loop skips predictor/LLM/FAK entry and runs dislocation maker + paper settlement only (`src/main.ts`).
 - Added: Paper maker dislocation events POST to `WEBHOOK_URL` with `mode=PAPER` and `recordType=MAKER_DISLOCATION_PAPER` (`src/engine/makerPaperWebhook.ts`, `src/engine/openOrderManager.ts`, `src/engine/paperTrader.ts`); live activity reporter payloads include `mode=LIVE` (`src/engine/n8nMovementSync.ts`).
 - Added: Maker directional GTD orders with `OpenOrderManager`, dislocation signal (Chainlink RTDS + Polymarket Market WS), paper fill simulation, and startup orphan rehydrate (`src/connectors/orderExecution.ts`, `src/engine/openOrderManager.ts`, `src/engine/dislocationSignal.ts`, `src/engine/makerDislocationRuntime.ts`, `src/main.ts`).
 - Added: Anti-double-buy entry guard — one BUY per market per session, max one open BTC 5m position, on-chain `/positions` check before entry (`src/engine/entryGuard.ts`, `src/main.ts`).

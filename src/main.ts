@@ -631,6 +631,48 @@ async function processLivePositionExits(
   }
 }
 
+/** Dislocation maker mode — no predictor, LLM, whale, or FAK entry path. */
+async function runMakerOnlyLoopTick(): Promise<void> {
+  if (liveActive) {
+    await maybeReconcileOpenPositions(false);
+  }
+
+  const marketMeta = await connector.getCurrentMarketInfo();
+  const marketId = marketMeta.slug;
+  const ticks = await connector.getMarketTicks(3);
+  const yesPrice = ticks[ticks.length - 1]?.yesPrice ?? 0.5;
+
+  if (paperActive) {
+    paperTrader.onMarketTick(marketId, yesPrice, marketMeta.remainingSec);
+  }
+
+  if (liveActive) {
+    const eventContext = makeEventContext(marketMeta.remainingSec, yesPrice, 0.5);
+    if (singleTradeMode && singleTradeMarketId) {
+      await processLivePositionExits(marketId, marketMeta.remainingSec, yesPrice, eventContext, {
+        onClosed: async (payload) => {
+          if (singleTradeMarketId && payload.marketId === singleTradeMarketId) {
+            await finishSingleTrade(payload);
+          }
+        }
+      });
+    } else {
+      await processLivePositionExits(
+        marketId,
+        marketMeta.remainingSec,
+        yesPrice,
+        eventContext
+      );
+    }
+  }
+
+  await runDislocationFastPath();
+
+  logger.default.info(
+    `[${new Date().toISOString()}] maker tick ${marketId} rem=${marketMeta.remainingSec}s yes=${yesPrice.toFixed(3)}`
+  );
+}
+
 async function loop() {
   if (loopInFlight || shuttingDown) {
     logger.default.info(`[${new Date().toISOString()}] skipping tick (previous loop still running)`);
@@ -638,6 +680,11 @@ async function loop() {
   }
   loopInFlight = true;
   try {
+    if (cfg.makerEnabled) {
+      await runMakerOnlyLoopTick();
+      return;
+    }
+
     if (liveActive) {
       await maybeReconcileOpenPositions(false);
     }
@@ -910,10 +957,6 @@ async function loop() {
       }
     }
 
-    if (cfg.makerEnabled) {
-      await runDislocationFastPath();
-    }
-
     if (liveActive) {
       if (singleTradeMode && singleTradeMarketId) {
         await processLivePositionExits(marketId, marketMeta.remainingSec, features.yesPrice, eventContext, {
@@ -979,6 +1022,10 @@ if (singleTradeMode) {
   logger.default.info(
     `Starting SINGLE-TRADE mode (live $${cfg.maxPositionUsd}, conf>=${cfg.confidenceThreshold}).`
   );
+} else if (paperActive && cfg.makerEnabled) {
+  logger.default.info(
+    `Starting dislocation maker bot (PAPER_MODE, predictor off, edge>=${cfg.makerMinEdge}).`
+  );
 } else if (paperActive) {
   logger.default.info("Starting short-horizon bot (PAPER_MODE).");
 } else {
@@ -989,7 +1036,7 @@ if (liveActive && cfg.positionReconcileEnabled) {
   await maybeReconcileOpenPositions(true);
 }
 
-if (cfg.binanceFeaturesEnabled && cfg.binanceWsEnabled) {
+if (cfg.binanceFeaturesEnabled && cfg.binanceWsEnabled && !cfg.makerEnabled) {
   try {
     startBinanceKlineWs();
     logger.default.info("[binance-ws] started btcusdt@kline_1m feed");
