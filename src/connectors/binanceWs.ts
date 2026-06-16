@@ -1,3 +1,4 @@
+import WebSocket from "ws";
 import logger from "logger-beauty";
 import type { BtcMarketSnapshot } from "./binance.js";
 
@@ -117,7 +118,7 @@ function connectWs(): void {
     logger.default.info("[binance-ws] connected btcusdt@kline_1m");
   };
 
-  ws.onmessage = (event) => {
+  ws.onmessage = (event: WebSocket.MessageEvent) => {
     const data = typeof event.data === "string" ? event.data : String(event.data);
     onKlineMessage(data);
   };

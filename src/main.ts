@@ -977,8 +977,16 @@ if (liveActive && cfg.positionReconcileEnabled) {
 }
 
 if (cfg.binanceFeaturesEnabled && cfg.binanceWsEnabled) {
-  startBinanceKlineWs();
-  logger.default.info("[binance-ws] started btcusdt@kline_1m feed");
+  try {
+    startBinanceKlineWs();
+    logger.default.info("[binance-ws] started btcusdt@kline_1m feed");
+  } catch (error) {
+    logger.default.warn(
+      `[binance-ws] failed to start — using REST fallback: ${
+        error instanceof Error ? error.message : String(error)
+      }`
+    );
+  }
 }
 
 await loop();
