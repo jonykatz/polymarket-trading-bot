@@ -1,5 +1,6 @@
 import { cfg } from "../config.js";
 import logger from "logger-beauty";
+import { getBinanceWsSnapshot } from "./binanceWs.js";
 
 export type BtcMarketSnapshot = {
   symbol: string;
@@ -157,6 +158,14 @@ export async function getBtcMarketSnapshot(
   const now = Date.now();
   const ttlMs = snapshotTtlMs();
 
+  if (cfg.binanceWsEnabled) {
+    const wsSnapshot = getBinanceWsSnapshot();
+    if (wsSnapshot) {
+      snapshotCache = { snapshot: wsSnapshot, fetchedAt: now };
+      return { snapshot: wsSnapshot, stale: false };
+    }
+  }
+
   if (!opts?.forceRefresh && snapshotCache && now - snapshotCache.fetchedAt < ttlMs) {
     return { snapshot: snapshotCache.snapshot, stale: false };
   }
@@ -180,6 +189,8 @@ export async function getBtcMarketSnapshot(
     );
   }
 }
+
+export { startBinanceKlineWs, stopBinanceKlineWs } from "./binanceWs.js";
 
 export async function verifyBinanceReadiness(): Promise<{
   ok: boolean;

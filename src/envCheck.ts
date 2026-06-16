@@ -219,6 +219,21 @@ export function validateBotEnv(): void {
       `POSITION_RECONCILE_SIZE_THRESHOLD must be in [0, 100] (got ${cfg.positionReconcileSizeThreshold}).`
     );
   }
+  if (
+    !Number.isFinite(cfg.exitSellMaxAttempts) ||
+    !Number.isInteger(cfg.exitSellMaxAttempts) ||
+    cfg.exitSellMaxAttempts < 1 ||
+    cfg.exitSellMaxAttempts > 20
+  ) {
+    errors.push(`EXIT_SELL_MAX_ATTEMPTS must be an integer in [1, 20] (got ${cfg.exitSellMaxAttempts}).`);
+  }
+  if (
+    !Number.isFinite(cfg.exitSlippageEscalation) ||
+    cfg.exitSlippageEscalation < 0 ||
+    cfg.exitSlippageEscalation > 0.5
+  ) {
+    errors.push(`EXIT_SLIPPAGE_ESCALATION must be in [0, 0.5] (got ${cfg.exitSlippageEscalation}).`);
+  }
 
   const openaiKey = (process.env.OPENAI_API_KEY ?? "").trim();
   if (openaiKey && !validHttpUrl(cfg.openaiBaseUrl)) {

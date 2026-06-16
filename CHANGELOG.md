@@ -6,6 +6,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+- Fixed: `entryGuard` allows entry on new markets while expired positions await Polymarket settlement (`src/engine/btc5mMarket.ts`, `src/engine/entryGuard.ts`).
+- Added: Anti-double-buy entry guard — one BUY per market per session, max one open BTC 5m position, on-chain `/positions` check before entry (`src/engine/entryGuard.ts`, `src/main.ts`).
+- Changed: Live exits escalate slippage per retry and defer to settlement after `EXIT_SELL_MAX_ATTEMPTS` with explicit logs instead of silent abandon (`src/main.ts`, `src/config.ts`).
+- Changed: `movementId` includes market slug/condition so batch REDEEM txs no longer collide across markets (`src/connectors/accountActivity.ts`).
+- Added: Binance BTC kline WebSocket feed (`wss://fstream.binance.com/ws/btcusdt@kline_1m`) as primary price source; REST fallback when WS stale (`src/connectors/binanceWs.ts`, `src/connectors/binance.ts`).
 - Fixed: Infer WIN/LOSS on EXIT SELL rows in Sheets reporter by pairing with matching ENTRY (`src/engine/n8nMovementSync.ts`).
 - Fixed: Skip take profit / stop loss / force exit until `MIN_POSITION_AGE_MS` after BUY so CLOB tokens can settle (`src/engine/exitStrategy.ts`).
 - Added: `npm run polymarket:positions` spike CLI for Data API `/positions` (`src/polymarketPositions.ts`, `src/connectors/accountPositions.ts`).

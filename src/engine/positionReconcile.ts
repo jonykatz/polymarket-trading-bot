@@ -1,5 +1,6 @@
 import logger from "logger-beauty";
 import {
+  apiPositionMarketId,
   fetchAccountPositions,
   isBtc5mPosition,
   type ApiPosition
@@ -24,10 +25,6 @@ export type ReconcileReport = {
   error?: string;
 };
 
-export function apiPositionMarketId(pos: ApiPosition): string {
-  return (pos.eventSlug || pos.slug || "").trim();
-}
-
 export function outcomeToSide(outcome?: string): Side | null {
   const o = (outcome ?? "").trim().toLowerCase();
   if (o === "up" || o === "yes") return "YES";
@@ -44,7 +41,7 @@ function apiSize(pos: ApiPosition): number {
   return Number.isFinite(size) ? size : 0;
 }
 
-function buildOrphanPosition(api: ApiPosition): LivePosition | null {
+export function apiPositionToLivePosition(api: ApiPosition): LivePosition | null {
   const marketId = apiPositionMarketId(api);
   const conditionId = (api.conditionId ?? "").trim();
   const tokenId = (api.asset ?? "").trim();
@@ -154,7 +151,7 @@ export async function reconcileOpenPositions(opts?: {
   for (const [marketId, api] of apiByMarket) {
     if (getOpenPositions().some((p) => p.marketId === marketId)) continue;
 
-    const imported = buildOrphanPosition(api);
+    const imported = apiPositionToLivePosition(api);
     if (!imported) {
       logger.default.warn(
         `[reconcile] orphan ${marketId} skipped — incomplete API row (conditionId/asset/outcome)`

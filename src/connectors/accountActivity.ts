@@ -80,9 +80,20 @@ export function inferTradeLeg(type: ActivityType, side: AccountMovement["side"])
   return "OTHER";
 }
 
-export function buildMovementId(movement: Pick<AccountMovement, "transactionHash" | "type" | "side" | "timestampSec">): string {
+export function buildMovementId(
+  movement: Pick<
+    AccountMovement,
+    "transactionHash" | "type" | "side" | "timestampSec" | "conditionId" | "eventSlug" | "marketSlug"
+  >
+): string {
   const side = movement.side ?? "NONE";
-  return `${movement.transactionHash}:${movement.type}:${side}:${movement.timestampSec}`;
+  const marketKey = (
+    movement.eventSlug ||
+    movement.marketSlug ||
+    movement.conditionId ||
+    "unknown"
+  ).trim();
+  return `${movement.transactionHash}:${movement.type}:${side}:${movement.timestampSec}:${marketKey}`;
 }
 
 /** Fee from API price vs wallet cash flow. Always ≤ 0 (cost); REDEEM → 0. */

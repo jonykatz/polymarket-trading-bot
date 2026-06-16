@@ -12,6 +12,12 @@ export const cfg = {
   binanceRestBase: process.env.BINANCE_REST_BASE ?? "https://fapi.binance.com",
   binanceFeaturesEnabled: envBool(process.env.BINANCE_FEATURES_ENABLED, true),
   binanceSnapshotTtlSec: Number(process.env.BINANCE_SNAPSHOT_TTL_SEC ?? 60),
+  /** Binance futures kline WebSocket (primary BTC price feed when enabled). */
+  binanceWsEnabled: envBool(process.env.BINANCE_WS_ENABLED, true),
+  /** Max FAK sell attempts per position before deferring to settlement. */
+  exitSellMaxAttempts: Number(process.env.EXIT_SELL_MAX_ATTEMPTS ?? 5),
+  /** Extra slippage added per failed sell attempt (cumulative, capped at 0.5). */
+  exitSlippageEscalation: Number(process.env.EXIT_SLIPPAGE_ESCALATION ?? 0.03),
   openaiApiKey: process.env.OPENAI_API_KEY?.trim() || undefined,
   openaiBaseUrl: (process.env.OPENAI_BASE_URL ?? "").trim() || "https://api.openai.com/v1",
   openaiModel: (process.env.OPENAI_MODEL ?? "").trim() || "gpt-4o-mini",

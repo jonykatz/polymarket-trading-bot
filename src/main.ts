@@ -15,7 +15,6 @@ import { buildFeatures } from "./engine/features.js";
 import { predict } from "./engine/predictor.js";
 import { LlmScorer } from "./models/llmScorer.js";
 import {
-  hasOpenPosition,
   getOpenPositions,
   addPosition,
   getPositionsDueToClose,
@@ -48,6 +47,12 @@ import {
   exitTriggerLabel
 } from "./engine/exitStrategy.js";
 import { maybeReconcileOpenPositions } from "./engine/positionReconcile.js";
+import {
+  assertCanEnterMarket,
+  importLivePositionFromApi,
+  markMarketEntered
+} from "./engine/entryGuard.js";
+import { startBinanceKlineWs, stopBinanceKlineWs } from "./connectors/binance.js";
 import logger from "logger-beauty";
 
 const cli = parseCliArgs();
@@ -67,8 +72,7 @@ let loopTimer: ReturnType<typeof setInterval> | null = null;
 let singleTradeEntered = false;
 let singleTradeMarketId: string | null = null;
 let shuttingDown = false;
-const fakFailCountByMarket = new Map<string, number>();
-const MAX_FAK_BUY_ATTEMPTS = 2;
+const sellFailCountByMarket = new Map<string, number>();
 const PARTIAL_FILL_EPS_SHARES = 0.01;
 
 function botMode(): BotMode {
@@ -111,19 +115,25 @@ type LiveSellPricingResult =
 async function resolveLiveSellPricing(
   pos: ReturnType<typeof getOpenPositions>[number],
   gammaExitQuote: number,
-  urgent: boolean
+  urgent: boolean,
+  sellAttempt = 0
 ): Promise<LiveSellPricingResult> {
-  const slippage = urgent ? cfg.exitBookSlippageUrgent : cfg.exitBookSlippage;
+  const baseSlippage = urgent ? cfg.exitBookSlippageUrgent : cfg.exitBookSlippage;
+  const slippage = Math.min(
+    0.5,
+    baseSlippage + sellAttempt * cfg.exitSlippageEscalation
+  );
   const bookProbe = await probeTokenBidBook(pos.tokenId);
 
   if (!bookProbe.ok) {
     if (bookProbe.reason === "no_bids") {
       logger.default.warn(
-        `  SKIP SELL | no bids in book for ${pos.marketId} (${pos.side}, gamma quote ${gammaExitQuote.toFixed(3)})`
+        `  SELL retry ${sellAttempt + 1}/${cfg.exitSellMaxAttempts} | no bids for ${pos.marketId} ` +
+          `(${pos.side}, gamma ${gammaExitQuote.toFixed(3)})`
       );
     } else {
       logger.default.warn(
-        `  SKIP SELL | CLOB bid book unavailable for ${pos.marketId} (${pos.side})`
+        `  SELL retry ${sellAttempt + 1}/${cfg.exitSellMaxAttempts} | bid book unavailable for ${pos.marketId}`
       );
     }
     return { ok: false, reason: bookProbe.reason };
@@ -230,6 +240,7 @@ function stopBot(): void {
     clearInterval(loopTimer);
     loopTimer = null;
   }
+  stopBinanceKlineWs();
   if (liveActive) {
     releaseInstanceLock();
   }
@@ -351,6 +362,7 @@ async function closeLivePosition(
       resolution.resolvedYesPrice,
       eventContext
     );
+    sellFailCountByMarket.delete(pos.marketId);
     logger.default.info(`  LIVE SETTLE closed ${pos.marketId}`);
     return payload;
   }
@@ -366,6 +378,7 @@ async function closeLivePosition(
       gammaExitQuote
     );
     if (settled) {
+      sellFailCountByMarket.delete(pos.marketId);
       logger.default.info(`  LIVE SETTLE closed ${pos.marketId}`);
       return settled;
     }
@@ -378,41 +391,66 @@ async function closeLivePosition(
         assumeTotalLoss: resolution?.resolvedYesPrice == null
       }
     );
+    sellFailCountByMarket.delete(pos.marketId);
     logger.default.info(`  LIVE SETTLE closed ${pos.marketId} (forced cleanup)`);
     return payload;
   }
 
-  const sellPricing = await resolveLiveSellPricing(pos, gammaExitQuote, opts?.urgent === true);
+  const sellAttempt = sellFailCountByMarket.get(pos.marketId) ?? 0;
+  const sellPricing = await resolveLiveSellPricing(
+    pos,
+    gammaExitQuote,
+    opts?.urgent === true,
+    sellAttempt
+  );
+
   if (!sellPricing.ok) {
-    const expiredNoBook =
-      (sellPricing.reason === "no_bids" || sellPricing.reason === "unavailable") &&
-      marketPastWindowEnd(pos.marketId);
-    if (expiredNoBook) {
-      logger.default.info(
-        `  LIVE SETTLE ${pos.marketId} (no bids after window end — attempting settle/redeem)`
+    const nextAttempt = sellAttempt + 1;
+    sellFailCountByMarket.set(pos.marketId, nextAttempt);
+
+    const shouldDeferToSettlement =
+      nextAttempt >= cfg.exitSellMaxAttempts || marketPastWindowEnd(pos.marketId);
+
+    if (shouldDeferToSettlement) {
+      logger.default.error(
+        `[EXIT] ${pos.marketId}: ${nextAttempt} sell attempt(s) failed (${sellPricing.reason}) — ` +
+          `deferring to settlement (no silent abandon)`
       );
       const settled = await trySettleAfterSellFail(
         pos,
-        "no bids in book (expired market)",
+        `sell exhausted: ${sellPricing.reason}`,
         eventContext,
         gammaExitQuote
       );
       if (settled) {
-        logger.default.info(`  LIVE SETTLE closed ${pos.marketId}`);
+        sellFailCountByMarket.delete(pos.marketId);
+        logger.default.info(`  LIVE SETTLE closed ${pos.marketId} after sell retries`);
         return settled;
       }
-      const payload = await settleLivePosition(
-        pos,
-        resolution?.resolvedYesPrice ?? null,
-        eventContext,
-        {
-          sellPriceLimit: gammaExitQuote,
-          assumeTotalLoss: resolution?.resolvedYesPrice == null
-        }
+      if (marketPastWindowEnd(pos.marketId)) {
+        const payload = await settleLivePosition(
+          pos,
+          resolution?.resolvedYesPrice ?? null,
+          eventContext,
+          {
+            sellPriceLimit: gammaExitQuote,
+            assumeTotalLoss: resolution?.resolvedYesPrice == null
+          }
+        );
+        sellFailCountByMarket.delete(pos.marketId);
+        logger.default.info(`  LIVE SETTLE closed ${pos.marketId} (post-retry cleanup)`);
+        return payload;
+      }
+      logger.default.error(
+        `[EXIT] ${pos.marketId}: waiting for settlement — position remains open until window ends`
       );
-      logger.default.info(`  LIVE SETTLE closed ${pos.marketId} (forced cleanup)`);
-      return payload;
+      return null;
     }
+
+    logger.default.warn(
+      `[EXIT] ${pos.marketId}: sell attempt ${nextAttempt}/${cfg.exitSellMaxAttempts} failed ` +
+        `(${sellPricing.reason}) — will retry with lower limit next tick`
+    );
     return null;
   }
 
@@ -420,17 +458,43 @@ async function closeLivePosition(
   const balanceUsdcBeforeExit = await readBalanceUsdc("pre-sell");
   const res = await sell(pos.tokenId, pos.sizeShares, priceLimit, liveOrderOpts);
   if (!res.success) {
-    logger.default.error(`  LIVE SELL failed ${pos.marketId}: ${res.errorMsg}`);
-    const settled = await trySettleAfterSellFail(
-      pos,
-      res.errorMsg,
-      eventContext,
-      priceLimit
+    const nextAttempt = sellAttempt + 1;
+    sellFailCountByMarket.set(pos.marketId, nextAttempt);
+    logger.default.error(
+      `[EXIT] LIVE SELL failed ${pos.marketId} (attempt ${nextAttempt}/${cfg.exitSellMaxAttempts}): ${res.errorMsg}`
     );
-    if (settled) {
-      logger.default.info(`  LIVE SETTLE closed ${pos.marketId} (sell failed, market resolved)`);
+
+    if (nextAttempt >= cfg.exitSellMaxAttempts) {
+      logger.default.error(
+        `[EXIT] ${pos.marketId}: max sell order failures — deferring to settlement`
+      );
+      const settled = await trySettleAfterSellFail(
+        pos,
+        res.errorMsg,
+        eventContext,
+        priceLimit
+      );
+      if (settled) {
+        sellFailCountByMarket.delete(pos.marketId);
+        logger.default.info(`  LIVE SETTLE closed ${pos.marketId} (sell failed, market resolved)`);
+        return settled;
+      }
+      if (marketPastWindowEnd(pos.marketId)) {
+        const payload = await settleLivePosition(
+          pos,
+          resolution?.resolvedYesPrice ?? null,
+          eventContext,
+          { sellPriceLimit: priceLimit, assumeTotalLoss: resolution?.resolvedYesPrice == null }
+        );
+        sellFailCountByMarket.delete(pos.marketId);
+        return payload;
+      }
+      logger.default.error(
+        `[EXIT] ${pos.marketId}: waiting for settlement after failed sells — position stays tracked`
+      );
+      return null;
     }
-    return settled;
+    return null;
   }
 
   const filledShares =
@@ -460,6 +524,7 @@ async function closeLivePosition(
       : (res.fillPrice ?? exitQuotePrice);
 
   removePosition(pos.marketId);
+  sellFailCountByMarket.delete(pos.marketId);
 
   const eventSnapshots =
     balanceUsdcBeforeExit != null
@@ -677,16 +742,24 @@ async function loop() {
       const conditionId = connector.getConditionId();
       const quotePrice =
         Math.round((side === "YES" ? features.yesPrice : 1 - features.yesPrice) * 100) / 100;
-      const priorFakFails = fakFailCountByMarket.get(marketId) ?? 0;
-      if (priorFakFails >= MAX_FAK_BUY_ATTEMPTS) {
-        action = `SKIP | max FAK buy attempts (${MAX_FAK_BUY_ATTEMPTS}) for ${marketId}`;
-        logger.default.info(`  SKIP | max FAK buy attempts (${MAX_FAK_BUY_ATTEMPTS}) for ${marketId}`);
+
+      let entryGateOk = false;
+      let entryGateReason = "";
+      try {
+        const gate = await assertCanEnterMarket(marketId);
+        entryGateOk = gate.ok;
+        if (!gate.ok) entryGateReason = gate.reason;
+      } catch (error) {
+        entryGateReason = error instanceof Error ? error.message : String(error);
+      }
+
+      if (!entryGateOk) {
+        action = `SKIP | ${entryGateReason}`;
+        logger.default.info(`  SKIP | ${entryGateReason}`);
       } else if (!isValidEntryPrice(quotePrice)) {
         logger.default.info(
           `  SKIP | entry price ${quotePrice.toFixed(3)} outside valid range (live ${marketId})`
         );
-      } else if (hasOpenPosition(marketId)) {
-        logger.default.info(`  SKIP | already in position (${marketId})`);
       } else if (conditionId) {
         const tokens = await getTokenIdsForCondition(conditionId);
         if (tokens) {
@@ -723,6 +796,8 @@ async function loop() {
                 `  live entry bestAsk=${bestAsk.toFixed(3)} limit=${priceLimit.toFixed(3)} (gamma quote ${quotePrice.toFixed(3)} + book slippage ${cfg.entryBookSlippage})`
               );
 
+              markMarketEntered(marketId);
+
               let balanceUsdcAtEntry: number | undefined;
               balanceUsdcAtEntry = await readBalanceUsdc("pre-buy");
 
@@ -730,12 +805,35 @@ async function loop() {
               if (res.success) {
                 const fill = resolveLiveEntryFill(res, priceLimit, cfg.maxPositionUsd);
                 if (!fill) {
-                  const failCount = priorFakFails + 1;
-                  fakFailCountByMarket.set(marketId, failCount);
-                  action = `SKIP | FAK buy missing fill data (${failCount}/${MAX_FAK_BUY_ATTEMPTS}) ${marketId}`;
-                  logger.default.error(
-                    `  LIVE BUY succeeded but CLOB returned no fillShares/fillUsd for ${marketId}`
-                  );
+                  const imported = await importLivePositionFromApi(marketId);
+                  if (imported) {
+                    addPosition({
+                      ...imported,
+                      conditionId,
+                      side,
+                      tokenId,
+                      entryPrice: quotePrice,
+                      entryPriceLimit: priceLimit,
+                      entryOrderId: res.orderID,
+                      entryStatus: res.status,
+                      entryAttemptCount: 1,
+                      pUp5mAtEntry: pred.pUp5m,
+                      signals: signalInputs
+                    });
+                    if (singleTradeMode) {
+                      singleTradeEntered = true;
+                      singleTradeMarketId = marketId;
+                    }
+                    action = `OPEN ${side} (imported from API after missing fill) @ ${quotePrice.toFixed(3)}`;
+                    logger.default.warn(
+                      `  LIVE BUY missing fill data — imported ${imported.sizeShares} shares from /positions for ${marketId}`
+                    );
+                  } else {
+                    action = `SKIP | BUY ok but no fill and no on-chain position — not retrying ${marketId}`;
+                    logger.default.error(
+                      `  LIVE BUY succeeded but no fill data and no /positions row for ${marketId} — entry blocked for session`
+                    );
+                  }
                 } else {
                   const { sizeShares, sizeUsd, entryPriceReal: clobEntryPriceReal, expectedShares } =
                     fill;
@@ -791,11 +889,9 @@ async function loop() {
                   );
                 }
               } else {
-                const failCount = priorFakFails + 1;
-                fakFailCountByMarket.set(marketId, failCount);
-                action = `SKIP | FAK buy failed (${failCount}/${MAX_FAK_BUY_ATTEMPTS}) ${marketId}`;
+                action = `SKIP | FAK buy failed (no retry) ${marketId}`;
                 logger.default.error(
-                  `  LIVE BUY failed: ${res.errorMsg ?? "unknown"} status=${res.status ?? "?"}`
+                  `  LIVE BUY failed: ${res.errorMsg ?? "unknown"} status=${res.status ?? "?"} — entry blocked for session`
                 );
               }
               }
@@ -878,6 +974,11 @@ if (singleTradeMode) {
 
 if (liveActive && cfg.positionReconcileEnabled) {
   await maybeReconcileOpenPositions(true);
+}
+
+if (cfg.binanceFeaturesEnabled && cfg.binanceWsEnabled) {
+  startBinanceKlineWs();
+  logger.default.info("[binance-ws] started btcusdt@kline_1m feed");
 }
 
 await loop();

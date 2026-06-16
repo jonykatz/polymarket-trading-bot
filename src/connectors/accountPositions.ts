@@ -30,6 +30,10 @@ export type ApiPosition = {
   negativeRisk?: boolean;
 };
 
+export function apiPositionMarketId(pos: ApiPosition): string {
+  return (pos.eventSlug || pos.slug || "").trim();
+}
+
 export type FetchAccountPositionsOpts = {
   wallet?: string;
   /** Min position size (API default 1). Use 0.01 for spike on small test positions. */
