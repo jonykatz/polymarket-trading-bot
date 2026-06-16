@@ -269,17 +269,38 @@ MOCK_SKIP='{
   "notes": "mock SIGNAL_SKIP"
 }'
 
+MOCK_MAKER_PAPER='{
+  "recordType": "MAKER_DISLOCATION_PAPER",
+  "mode": "PAPER",
+  "lifecycle": "SETTLED",
+  "eventId": "mock-maker-paper-001",
+  "orderId": "paper-maker-mock-001",
+  "timestamp": "2026-06-16T18:05:12.000Z",
+  "marketId": "btc-updown-5m-1781016300",
+  "side": "YES",
+  "edge": 0.052,
+  "limitPrice": 0.58,
+  "filled": true,
+  "pnlSimulated": 4.2,
+  "fillPrice": 0.58,
+  "sizeUsd": 100,
+  "fairYes": 0.63,
+  "yesPrice": 0.55,
+  "deltaBtc": 0.0012
+}'
+
 case "$KIND" in
   fok) post TRADE_CLOSED_FOK "$MOCK_FOK" ;;
   settle) post TRADE_CLOSED_SETTLE "$MOCK_SETTLE" ;;
   fak) post ENTRY_FAK_FAILED "$MOCK_FAK_FAIL" ;;
   skip) post SIGNAL_SKIP "$MOCK_SKIP" ;;
+  maker-paper) post MAKER_DISLOCATION_PAPER "$MOCK_MAKER_PAPER" ;;
   all)
     post TRADE_CLOSED_FOK "$MOCK_FOK"
     echo "Tip: re-click Execute workflow in n8n before each next call (test webhook)."
     ;;
   *)
-    echo "Usage: $0 [fok|settle|fak|skip|all]"
+    echo "Usage: $0 [fok|settle|fak|skip|maker-paper|all]"
     exit 1
     ;;
 esac

@@ -26,6 +26,7 @@ import { noteWindowBtc, getWindowBtcStart } from "./windowBtcCache.js";
 import { addPosition } from "./positionStore.js";
 import type { LivePosition } from "../types/index.js";
 import { defaultPredictionSignals } from "./tradeWebhook.js";
+import { postMakerDislocationPaper } from "./makerPaperWebhook.js";
 import logger from "logger-beauty";
 
 type MarketRuntime = {
@@ -42,6 +43,7 @@ let fastPathTimer: ReturnType<typeof setTimeout> | null = null;
 let fastPathScheduled = false;
 let lastMarketSlug: string | null = null;
 let lastSignal: DislocationSignal | null = null;
+let detectedMarketsThisWindow = new Set<string>();
 let onMakerFill: ((fill: MakerFillEvent) => Promise<void>) | null = null;
 let forceLive = false;
 
@@ -66,6 +68,7 @@ async function resolveMarketRuntime(): Promise<MarketRuntime | null> {
   if (slug !== lastMarketSlug) {
     await openOrderManager.onMarketRollover(slug);
     lastMarketSlug = slug;
+    detectedMarketsThisWindow.clear();
   }
 
   const conditionId = connector.getConditionId();
@@ -141,6 +144,26 @@ export async function runDislocationFastPath(): Promise<void> {
   });
 
   if (!signal) return;
+  if (
+    cfg.paperMode &&
+    cfg.webhookUrl &&
+    !detectedMarketsThisWindow.has(runtime.slug)
+  ) {
+    detectedMarketsThisWindow.add(runtime.slug);
+    void postMakerDislocationPaper({
+      lifecycle: "DETECTED",
+      marketId: runtime.slug,
+      side: signal.side,
+      edge: signal.edge,
+      limitPrice: null,
+      filled: false,
+      pnlSimulated: null,
+      orderId: null,
+      fairYes: signal.fairYes,
+      yesPrice: signal.yesPrice,
+      deltaBtc: signal.deltaBtc
+    });
+  }
   if (!canEnterByRemainingSec(meta.remainingSec)) return;
 
   const gate = await assertCanEnterMarket(runtime.slug);

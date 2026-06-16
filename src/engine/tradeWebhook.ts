@@ -29,6 +29,8 @@ export type PredictionSignals = {
 
 export type ClosedTradePayload = {
   timestamp: string;
+  /** PAPER = simulated; LIVE = CLOB wallet; single-trade = one-shot live CLI. */
+  mode?: "PAPER" | "LIVE" | "single-trade";
   date: string;
   hour: number;
   session: "asia" | "europe" | "us" | "off";
@@ -145,6 +147,7 @@ export function buildClosedTradePayload(input: {
   settlementOutcome?: SettlementOutcome | null;
   exitErrorMsg?: string | null;
   timestamp?: string;
+  mode?: ClosedTradePayload["mode"];
 }): ClosedTradePayload {
   const timestamp = input.timestamp ?? new Date().toISOString();
   const dateObj = new Date(timestamp);
@@ -189,6 +192,7 @@ export function buildClosedTradePayload(input: {
 
   const payload: ClosedTradePayload = {
     timestamp,
+    mode: input.mode,
     date: timestamp.slice(0, 10),
     hour: utcHour,
     session: getSessionByUtcHour(utcHour),
@@ -232,16 +236,21 @@ export function buildClosedTradePayload(input: {
 
 export async function postClosedTradeWebhook(
   payload: ClosedTradePayload,
-  tag: "PAPER" | "LIVE" = "PAPER"
+  tag: "PAPER" | "LIVE" | "single-trade" = "PAPER"
 ): Promise<void> {
   const url = cfg.webhookUrl;
   if (!url) return;
+
+  const body: ClosedTradePayload = {
+    ...payload,
+    mode: payload.mode ?? tag
+  };
 
   try {
     const res = await fetch(url, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload)
+      body: JSON.stringify(body)
     });
     if (!res.ok) {
       logger.default.error(`[${tag}] Webhook POST failed (${res.status}): ${url}`);

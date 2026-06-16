@@ -14,6 +14,7 @@ import {
   markMarketMakerPending
 } from "./entryGuard.js";
 import { isValidEntryPrice } from "./paperTrader.js";
+import { postMakerDislocationPaper } from "./makerPaperWebhook.js";
 import type { Side } from "../types/index.js";
 
 export type MakerOrderStatus =
@@ -164,6 +165,20 @@ export class OpenOrderManager {
         `shares=${res.sizeShares} edge=${input.signal.edge.toFixed(3)} ` +
         `orderID=${res.orderID} exp=${input.gtdExpirySec}`
     );
+    void postMakerDislocationPaper({
+      lifecycle: "QUOTED",
+      marketId: input.marketId,
+      side: input.signal.side,
+      edge: input.signal.edge,
+      limitPrice,
+      filled: false,
+      pnlSimulated: null,
+      orderId: res.orderID,
+      sizeUsd: cfg.maxPositionUsd,
+      fairYes: input.signal.fairYes,
+      yesPrice: input.signal.yesPrice,
+      deltaBtc: input.signal.deltaBtc
+    });
     return { quoted: true };
   }
 
@@ -228,6 +243,18 @@ export class OpenOrderManager {
     logger.default.info(
       `[maker/paper] filled ${order.side} ${fillShares} @ ${fillPrice.toFixed(3)}`
     );
+    void postMakerDislocationPaper({
+      lifecycle: "FILLED",
+      marketId: order.marketId,
+      side: order.side,
+      edge: order.dislocationEdge,
+      limitPrice: order.limitPrice,
+      filled: true,
+      pnlSimulated: null,
+      orderId: order.orderId,
+      fillPrice,
+      sizeUsd: fillUsd
+    });
     if (this.onFill) {
       await this.onFill({
         record: order,
@@ -307,6 +334,18 @@ export class OpenOrderManager {
     logger.default.info(
       `[maker] cancelled ${order.marketId} reason=${reason} ok=${res.success}`
     );
+    void postMakerDislocationPaper({
+      lifecycle: "CANCELLED",
+      marketId: order.marketId,
+      side: order.side,
+      edge: order.dislocationEdge,
+      limitPrice: order.limitPrice,
+      filled: false,
+      pnlSimulated: 0,
+      orderId: order.orderId,
+      cancelReason: reason,
+      sizeUsd: order.sizeUsd
+    });
     return res.success;
   }
 

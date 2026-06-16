@@ -4,8 +4,10 @@ import { Prediction, Side } from "../types/index.js";
 import {
   buildClosedTradePayload,
   defaultPredictionSignals,
+  postClosedTradeWebhook,
   type PredictionSignals
 } from "./tradeWebhook.js";
+import { postMakerDislocationPaper } from "./makerPaperWebhook.js";
 
 export type { ClosedTradePayload, ExecutionStatus, PredictionSignals } from "./tradeWebhook.js";
 
@@ -77,6 +79,17 @@ type PaperPosition = {
   sizeUsd: number;
   openedAt: number;
   signals: PredictionSignals;
+  entryMethod?: "FAK" | "MAKER_GTD";
+  dislocationEdge?: number;
+  limitPrice?: number;
+  orderId?: string;
+};
+
+export type PaperOpenOptions = {
+  entryMethod?: "FAK" | "MAKER_GTD";
+  dislocationEdge?: number;
+  limitPrice?: number;
+  orderId?: string;
 };
 
 export class PaperTrader {
@@ -138,7 +151,8 @@ export class PaperTrader {
     side: Side,
     entryPrice: number,
     signals: PredictionSignals = this.pendingSignalsByMarket.get(marketId) ?? defaultPredictionSignals(),
-    sizeUsd = this.maxPositionUsd
+    sizeUsd = this.maxPositionUsd,
+    opts?: PaperOpenOptions
   ): void {
     if (this.enteredMarkets.has(marketId) || this.hasPosition(marketId)) return;
     if (!isValidEntryPrice(entryPrice)) return;
@@ -150,7 +164,11 @@ export class PaperTrader {
       entryPrice,
       sizeUsd,
       openedAt: Date.now(),
-      signals
+      signals,
+      entryMethod: opts?.entryMethod,
+      dislocationEdge: opts?.dislocationEdge,
+      limitPrice: opts?.limitPrice,
+      orderId: opts?.orderId
     });
   }
 
@@ -201,6 +219,44 @@ export class PaperTrader {
         `pnlUsd=${pnlUsd.toFixed(2)} cumulativePnlUsd=${this.cumulativePnlUsd.toFixed(2)}`
     );
 
+    if (pos.entryMethod === "MAKER_GTD") {
+      void postMakerDislocationPaper({
+        lifecycle: "SETTLED",
+        marketId: pos.marketId,
+        side: pos.side,
+        edge: pos.dislocationEdge ?? pos.signals.confidenceScore,
+        limitPrice: pos.limitPrice ?? pos.entryPrice,
+        filled: true,
+        pnlSimulated: pnlUsd,
+        orderId: pos.orderId ?? null,
+        fillPrice: pos.entryPrice,
+        sizeUsd: pos.sizeUsd
+      });
+      return;
+    }
+
+    const payload = buildClosedTradePayload({
+      marketId: pos.marketId,
+      side: pos.side,
+      entryPrice: pos.entryPrice,
+      exitPrice,
+      entryPriceReal: pos.entryPrice,
+      exitPriceReal: exitPrice,
+      slippageEntry: 0,
+      slippageExit: 0,
+      polymarketFee: 0,
+      sizeUsd: pos.sizeUsd,
+      pnlGross: pnlUsd,
+      pnlNet: pnlUsd,
+      signals: pos.signals,
+      executionStatus: "EXECUTED",
+      recordType: "PAPER_CLOSE",
+      exitMethod: "SETTLE",
+      settlementOutcome: pnlUsd > 0 ? "WIN" : pnlUsd < 0 ? "LOSS" : "UNKNOWN",
+      timestamp,
+      mode: "PAPER"
+    });
+    void postClosedTradeWebhook(payload, "PAPER");
   }
 
   listPositions() {

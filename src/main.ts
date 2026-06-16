@@ -1019,7 +1019,13 @@ await initMakerDislocation({
         fill.record.side,
         entryPrice,
         { ...defaultPredictionSignals(), confidenceScore: fill.record.dislocationEdge },
-        fill.fillUsd
+        fill.fillUsd,
+        {
+          entryMethod: "MAKER_GTD",
+          dislocationEdge: fill.record.dislocationEdge,
+          limitPrice: fill.record.limitPrice,
+          orderId: fill.record.orderId
+        }
       );
       logger.default.info(`  PAPER MAKER fill ${fill.record.side} @ ${fill.fillPrice.toFixed(3)}`);
       return;

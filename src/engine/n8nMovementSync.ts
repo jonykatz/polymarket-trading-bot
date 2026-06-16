@@ -9,6 +9,8 @@ const KNOWN_IDS_CAP = 500;
 
 export type N8nMovementPayload = {
   movementId: string;
+  /** LIVE wallet activity from Polymarket Data API; paper maker uses MAKER_DISLOCATION_PAPER. */
+  mode: "LIVE";
   timestamp: string;
   marketSlug: string;
   tradeLeg: TradeLeg;
@@ -121,6 +123,7 @@ export function toN8nPayload(
   const marketSlug = movementMarketKey(movement) || movement.marketSlug;
   return {
     movementId: movement.movementId,
+    mode: "LIVE",
     timestamp: movement.timestamp,
     marketSlug,
     tradeLeg: movement.tradeLeg,
