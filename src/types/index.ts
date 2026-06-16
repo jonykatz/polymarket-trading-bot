@@ -107,4 +107,6 @@ export interface LivePosition {
   pUp5mAtEntry?: number;
   /** Predictor signals at entry for close webhook. */
   signals?: PredictionSignals;
+  /** How the position was opened. */
+  entryMethod?: "FAK" | "MAKER_GTD";
 }

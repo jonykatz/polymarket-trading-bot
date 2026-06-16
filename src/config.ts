@@ -82,5 +82,13 @@ export const cfg = {
   /** Min share drift before updatePosition during reconcile. */
   positionSizeEps: Number(process.env.POSITION_SIZE_EPS ?? 0.05),
   /** API sizeThreshold query param when fetching /positions. */
-  positionReconcileSizeThreshold: Number(process.env.POSITION_RECONCILE_SIZE_THRESHOLD ?? 0.01)
+  positionReconcileSizeThreshold: Number(process.env.POSITION_RECONCILE_SIZE_THRESHOLD ?? 0.01),
+  /** Directional maker GTD quotes on dislocation signal. */
+  makerEnabled: envBool(process.env.MAKER_ENABLED, false),
+  makerMinEdge: Number(process.env.MAKER_MIN_EDGE ?? 0.03),
+  makerTimeoutSec: Number(process.env.MAKER_TIMEOUT_SEC ?? 30),
+  makerImproveBy: Number(process.env.MAKER_IMPROVE_BY ?? 0.01),
+  makerPollSec: Number(process.env.MAKER_POLL_SEC ?? 3),
+  makerPostOnly: envBool(process.env.MAKER_POST_ONLY, true),
+  makerSignalFlipCancel: envBool(process.env.MAKER_SIGNAL_FLIP_CANCEL, true)
 };

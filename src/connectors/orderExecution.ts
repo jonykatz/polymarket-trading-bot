@@ -9,7 +9,8 @@ import {
   type ApiKeyCreds,
   type BuilderConfig,
   type ClobToken,
-  type MarketDetails
+  type MarketDetails,
+  type TickSize
 } from "@polymarket/clob-client-v2";
 import { createWalletClient, http } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
@@ -648,6 +649,204 @@ export async function sell(
     orderType: "FAK",
     forceLive: opts?.forceLive
   });
+}
+
+function roundPriceToTick(price: number, tickSize: number): number {
+  if (!Number.isFinite(tickSize) || tickSize <= 0) {
+    return Math.round(price * 100) / 100;
+  }
+  const factor = 1 / tickSize;
+  return Math.round(price * factor) / factor;
+}
+
+function toClobTickSize(tickSize: number): TickSize {
+  if (tickSize <= 0.0001) return "0.0001";
+  if (tickSize <= 0.001) return "0.001";
+  if (tickSize <= 0.01) return "0.01";
+  return "0.1";
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+export type ClobOpenOrder = {
+  id: string;
+  asset_id: string;
+  side: string;
+  price: string;
+  original_size: string;
+  size_matched: string;
+  status: string;
+  order_type: string;
+};
+
+export async function getOpenOrdersForToken(tokenId: string): Promise<ClobOpenOrder[]> {
+  if (shouldSimulateOrder(false)) return [];
+  try {
+    const client = await getClient();
+    const rows = await client.getOpenOrders({ asset_id: tokenId }, true);
+    if (!Array.isArray(rows)) return [];
+    return rows as ClobOpenOrder[];
+  } catch (e: unknown) {
+    const err = e as Error;
+    logger.default.warn(
+      `getOpenOrdersForToken failed for ${tokenId}: ${err.message ?? String(e)}`
+    );
+    return [];
+  }
+}
+
+export async function getClobOrder(orderId: string): Promise<ClobOpenOrder | null> {
+  if (shouldSimulateOrder(false)) return null;
+  try {
+    const client = await getClient();
+    const row = await client.getOrder(orderId);
+    return row as ClobOpenOrder;
+  } catch {
+    return null;
+  }
+}
+
+export type CancelOrdersResult = {
+  success: boolean;
+  cancelledIds: string[];
+  errorMsg?: string;
+};
+
+export async function cancelOpenOrders(
+  tokenId: string,
+  opts?: { maxRetries?: number; retryMs?: number; orderId?: string }
+): Promise<CancelOrdersResult> {
+  if (shouldSimulateOrder(false)) {
+    return { success: true, cancelledIds: opts?.orderId ? [opts.orderId] : [] };
+  }
+
+  const maxRetries = opts?.maxRetries ?? 3;
+  const retryMs = opts?.retryMs ?? 500;
+  const client = await getClient();
+  let lastError = "";
+
+  for (let attempt = 0; attempt < maxRetries; attempt++) {
+    try {
+      if (opts?.orderId) {
+        await client.cancelOrder({ orderID: opts.orderId });
+        return { success: true, cancelledIds: [opts.orderId] };
+      }
+      await client.cancelMarketOrders({ asset_id: tokenId });
+      const remaining = await getOpenOrdersForToken(tokenId);
+      if (!remaining.length) {
+        return { success: true, cancelledIds: [] };
+      }
+      return {
+        success: true,
+        cancelledIds: remaining.map((o) => o.id)
+      };
+    } catch (e: unknown) {
+      const err = e as Error;
+      lastError = err.message ?? String(e);
+      if (attempt < maxRetries - 1) {
+        await sleep(retryMs * (attempt + 1));
+      }
+    }
+  }
+
+  return {
+    success: false,
+    cancelledIds: [],
+    errorMsg: lastError || "cancel failed"
+  };
+}
+
+export type PlaceMakerOrderParams = {
+  tokenId: string;
+  price: number;
+  sizeUsd: number;
+  gtdExpirySec: number;
+  postOnly?: boolean;
+  tickSize?: number;
+  minOrderSize?: number;
+  forceLive?: boolean;
+};
+
+export type PlaceMakerOrderResult = PlaceOrderResult & {
+  sizeShares: number;
+  gtdExpirySec: number;
+};
+
+function simulatedPaperMakerOrder(params: PlaceMakerOrderParams): PlaceMakerOrderResult {
+  const tickSize = params.tickSize ?? 0.01;
+  const price = roundPriceToTick(params.price, tickSize);
+  const sizeShares =
+    price > 0
+      ? Math.max(
+          params.minOrderSize ?? 0,
+          Math.floor((params.sizeUsd / price) * 100) / 100
+        )
+      : 0;
+  const orderID = `paper-maker-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+  logger.default.info(
+    `[PAPER] Simulated maker GTD | BUY size=${sizeShares} price=${price} ` +
+      `exp=${params.gtdExpirySec} tokenId=${params.tokenId} orderID=${orderID}`
+  );
+  return {
+    success: true,
+    orderID,
+    status: "live",
+    sizeShares,
+    gtdExpirySec: params.gtdExpirySec,
+    fillPrice: 0,
+    fillUsd: 0,
+    fillShares: 0
+  };
+}
+
+export async function placeMakerOrder(params: PlaceMakerOrderParams): Promise<PlaceMakerOrderResult> {
+  if (shouldSimulateOrder(params.forceLive)) {
+    return simulatedPaperMakerOrder(params);
+  }
+
+  const tickSize = params.tickSize ?? 0.01;
+  const minShares = params.minOrderSize ?? 0;
+  const price = roundPriceToTick(params.price, tickSize);
+  let sizeShares =
+    price > 0 ? Math.floor((params.sizeUsd / price) * 100) / 100 : 0;
+  if (minShares > 0) sizeShares = Math.max(sizeShares, minShares);
+  if (sizeShares <= 0) {
+    return {
+      success: false,
+      errorMsg: "invalid maker size",
+      sizeShares: 0,
+      gtdExpirySec: params.gtdExpirySec
+    };
+  }
+
+  try {
+    const client = await getClient();
+    const res = await client.createAndPostOrder(
+      {
+        tokenID: params.tokenId,
+        price,
+        size: sizeShares,
+        side: Side.BUY,
+        expiration: params.gtdExpirySec
+      },
+      { tickSize: toClobTickSize(tickSize) },
+      OrderType.GTD,
+      params.postOnly ?? true,
+      false
+    );
+    const enriched = await enrichOrderResult(client, params.tokenId, "BUY", price, sizeShares, res);
+    return { ...enriched, sizeShares, gtdExpirySec: params.gtdExpirySec };
+  } catch (e: unknown) {
+    const err = e as Error;
+    return {
+      success: false,
+      errorMsg: err.message ?? String(e),
+      sizeShares,
+      gtdExpirySec: params.gtdExpirySec
+    };
+  }
 }
 
 export async function verifyClobReadiness(conditionId?: string): Promise<{

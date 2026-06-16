@@ -16,6 +16,9 @@ const API_CACHE_MS = 5_000;
 /** Markets we already sent a BUY for this process lifetime — blocks FAK retries. */
 const enteredMarketsThisSession = new Set<string>();
 
+/** Markets with a resting maker GTD (not yet filled). */
+const makerPendingMarkets = new Set<string>();
+
 let apiPositionsCache: { at: number; rows: ApiPosition[] } | null = null;
 
 function apiSize(pos: ApiPosition): number {
@@ -84,6 +87,29 @@ export function wasMarketEnteredThisSession(marketId: string): boolean {
   return enteredMarketsThisSession.has(marketId);
 }
 
+export function hasPendingMakerOrder(): boolean {
+  return makerPendingMarkets.size > 0;
+}
+
+export function getPendingMakerMarketId(): string | null {
+  const first = makerPendingMarkets.values().next().value;
+  return first ?? null;
+}
+
+export function markMarketMakerPending(marketId: string): void {
+  makerPendingMarkets.add(marketId);
+  enteredMarketsThisSession.add(marketId);
+  invalidateApiCache();
+}
+
+export function clearMarketMakerPending(marketId: string): void {
+  makerPendingMarkets.delete(marketId);
+  if (!getOpenPositions().some((p) => p.marketId === marketId)) {
+    enteredMarketsThisSession.delete(marketId);
+  }
+  invalidateApiCache();
+}
+
 export async function findApiPositionForMarket(marketId: string): Promise<ApiPosition | null> {
   const rows = await loadOpenBtc5mApiPositions();
   return rows.find((row) => apiPositionMarketId(row) === marketId) ?? null;
@@ -126,6 +152,14 @@ export async function assertCanEnterMarket(marketId: string): Promise<EntryGateR
   if (apiActive.length > 0) {
     const slugs = apiActive.map((r) => apiPositionMarketId(r)).join(", ");
     return { ok: false, reason: `active on-chain BTC 5m position(s) (${slugs})` };
+  }
+
+  if (hasPendingMakerOrder()) {
+    const pending = getPendingMakerMarketId();
+    if (pending === marketId) {
+      return { ok: false, reason: `maker order pending on ${marketId}` };
+    }
+    return { ok: false, reason: `maker order pending on ${pending} (global block)` };
   }
 
   if (localPending.length > 0 || apiPending.length > 0) {

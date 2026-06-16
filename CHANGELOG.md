@@ -6,7 +6,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
-- Fixed: `entryGuard` allows entry on new markets while expired positions await Polymarket settlement (`src/engine/btc5mMarket.ts`, `src/engine/entryGuard.ts`).
+- Added: Maker directional GTD orders with `OpenOrderManager`, dislocation signal (Chainlink RTDS + Polymarket Market WS), paper fill simulation, and startup orphan rehydrate (`src/connectors/orderExecution.ts`, `src/engine/openOrderManager.ts`, `src/engine/dislocationSignal.ts`, `src/engine/makerDislocationRuntime.ts`, `src/main.ts`).
 - Added: Anti-double-buy entry guard — one BUY per market per session, max one open BTC 5m position, on-chain `/positions` check before entry (`src/engine/entryGuard.ts`, `src/main.ts`).
 - Changed: Live exits escalate slippage per retry and defer to settlement after `EXIT_SELL_MAX_ATTEMPTS` with explicit logs instead of silent abandon (`src/main.ts`, `src/config.ts`).
 - Changed: `movementId` includes market slug/condition so batch REDEEM txs no longer collide across markets (`src/connectors/accountActivity.ts`).

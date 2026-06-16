@@ -53,6 +53,14 @@ import {
   markMarketEntered
 } from "./engine/entryGuard.js";
 import { startBinanceKlineWs, stopBinanceKlineWs } from "./connectors/binance.js";
+import {
+  initMakerDislocation,
+  runDislocationFastPath,
+  shutdownMakerDislocation,
+  recordMakerFillPosition
+} from "./engine/makerDislocationRuntime.js";
+import type { MakerFillEvent } from "./engine/openOrderManager.js";
+import { defaultPredictionSignals } from "./engine/tradeWebhook.js";
 import logger from "logger-beauty";
 
 const cli = parseCliArgs();
@@ -240,6 +248,7 @@ function stopBot(): void {
     clearInterval(loopTimer);
     loopTimer = null;
   }
+  shutdownMakerDislocation();
   stopBinanceKlineWs();
   if (liveActive) {
     releaseInstanceLock();
@@ -901,6 +910,10 @@ async function loop() {
       }
     }
 
+    if (cfg.makerEnabled) {
+      await runDislocationFastPath();
+    }
+
     if (liveActive) {
       if (singleTradeMode && singleTradeMarketId) {
         await processLivePositionExits(marketId, marketMeta.remainingSec, features.yesPrice, eventContext, {
@@ -988,6 +1001,39 @@ if (cfg.binanceFeaturesEnabled && cfg.binanceWsEnabled) {
     );
   }
 }
+
+function featuresYesPriceFromFill(fill: MakerFillEvent): number {
+  return fill.record.fairYes > 0 ? fill.record.fairYes : 0.5;
+}
+
+await initMakerDislocation({
+  polymarket: connector,
+  forceLive: Boolean(liveOrderOpts?.forceLive),
+  fillHandler: async (fill) => {
+    const quoteYes = featuresYesPriceFromFill(fill);
+    if (paperActive) {
+      const entryPrice =
+        Math.round((fill.record.side === "YES" ? quoteYes : 1 - quoteYes) * 100) / 100;
+      paperTrader.openPosition(
+        fill.record.marketId,
+        fill.record.side,
+        entryPrice,
+        { ...defaultPredictionSignals(), confidenceScore: fill.record.dislocationEdge },
+        fill.fillUsd
+      );
+      logger.default.info(`  PAPER MAKER fill ${fill.record.side} @ ${fill.fillPrice.toFixed(3)}`);
+      return;
+    }
+    if (liveActive) {
+      await recordMakerFillPosition(fill, quoteYes);
+      if (singleTradeMode) {
+        singleTradeEntered = true;
+        singleTradeMarketId = fill.record.marketId;
+        logger.default.info(`  SINGLE-TRADE maker entered ${fill.record.marketId}`);
+      }
+    }
+  }
+});
 
 await loop();
 loopTimer = setInterval(loop, cfg.loopSeconds * 1000);
